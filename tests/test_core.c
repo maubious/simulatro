@@ -3275,6 +3275,55 @@ static void test_source_pack_generators_respect_consumable_capacity(void) {
     }
 }
 
+static void test_source_hallucination_open_booster_context(void) {
+    BalatroConfig config;
+    balatro_default_config(&config);
+    BalatroState state;
+    BalatroStepResult result;
+    BalatroAction open = {.type = BALATRO_ACTION_OPEN_BOOSTER, .primary = 0};
+
+    assert(balatro_init_seed_string(&state, &config, "HEURISTIC2") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SHOP;
+    state.ante = 3;
+    state.dollars = 20;
+    state.joker_count = 1;
+    state.jokers[0].center_id = BALATRO_CENTER_J_HALLUCINATION;
+    state.shop_count = 1;
+    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    assert(balatro_step(&state, &open, &result) == BALATRO_OK);
+    assert(state.phase == BALATRO_PHASE_PACK_OPENING);
+    assert(state.consumable_count == 1);
+
+    assert(balatro_init_seed_string(&state, &config, "HALLUCINATION_COPIES") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SHOP;
+    state.ante = 3;
+    state.dollars = 20;
+    state.consumable_slots = 4;
+    state.joker_count = 4;
+    state.jokers[0].center_id = BALATRO_CENTER_J_BLUEPRINT;
+    state.jokers[1].center_id = BALATRO_CENTER_J_HALLUCINATION;
+    state.jokers[2].center_id = BALATRO_CENTER_J_HALLUCINATION;
+    state.jokers[3].center_id = BALATRO_CENTER_J_OOPS;
+    state.shop_count = 1;
+    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    assert(balatro_step(&state, &open, &result) == BALATRO_OK);
+    assert(state.consumable_count == 3);
+
+    assert(balatro_init_seed_string(&state, &config, "HALLUCINATION_BRAINSTORM") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SHOP;
+    state.ante = 3;
+    state.dollars = 20;
+    state.consumable_slots = 3;
+    state.joker_count = 3;
+    state.jokers[0].center_id = BALATRO_CENTER_J_HALLUCINATION;
+    state.jokers[1].center_id = BALATRO_CENTER_J_BRAINSTORM;
+    state.jokers[2].center_id = BALATRO_CENTER_J_OOPS;
+    state.shop_count = 1;
+    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    assert(balatro_step(&state, &open, &result) == BALATRO_OK);
+    assert(state.consumable_count == 2);
+}
+
 static void test_source_blind_random_card_ordering(void) {
     BalatroConfig config;
     balatro_default_config(&config);
@@ -4145,6 +4194,7 @@ int main(void) {
     test_source_pack_consumable_use();
     test_source_emperor_reuses_named_stream();
     test_source_pack_generators_respect_consumable_capacity();
+    test_source_hallucination_open_booster_context();
     test_source_blind_random_card_ordering();
     test_source_manacle_restores_before_shop_pack();
     test_source_all_boss_temporary_state_clears_on_defeat();

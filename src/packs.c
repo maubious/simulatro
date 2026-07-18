@@ -8,11 +8,33 @@ static int add_hallucination_tarot(BalatroState *state) {
     double chance = 0.5;
     for (uint8_t i = 0; i < state->joker_count; ++i)
         if (!(state->jokers[i].flags & 1u) && state->jokers[i].center_id == BALATRO_CENTER_J_OOPS) chance *= 2.0;
-    if (balatro_pseudorandom(state, "hallucination") >= chance) return 0;
+    char stream[32];
+    balatro_key_with_u64(stream, sizeof(stream), "halu", state->ante);
+    if (balatro_pseudorandom(state, stream) >= chance) return 0;
     BalatroCard card = balatro_create_pooled_card(state, SET_TAROT, "hal", 0);
     state->consumables[state->consumable_count++] = card;
     balatro_consumable_added(state, &card);
     return 1;
+}
+
+static int resolves_to_hallucination(const BalatroState *state, uint8_t start) {
+    uint8_t index = start;
+    for (uint8_t depth = 0; depth <= state->joker_count; ++depth) {
+        if (index >= state->joker_count) return 0;
+        const BalatroCard *joker = &state->jokers[index];
+        if (joker->flags & 1u) return 0;
+        if (joker->center_id == BALATRO_CENTER_J_BLUEPRINT) {
+            index++;
+            continue;
+        }
+        if (joker->center_id == BALATRO_CENTER_J_BRAINSTORM) {
+            if (index == 0) return 0;
+            index = 0;
+            continue;
+        }
+        return joker->center_id == BALATRO_CENTER_J_HALLUCINATION;
+    }
+    return 0;
 }
 
 static BalatroCard standard_pack_card(BalatroState *state) {
@@ -110,13 +132,8 @@ static int open_pack_center(BalatroState *state, uint16_t center_id) {
         }
     }
     for (uint8_t i = 0; i < temporary_count; ++i) balatro_unmark_center_used(state, temporary[i]);
-    if (state->joker_count) {
-        for (uint8_t i = 0; i < state->joker_count; ++i)
-            if (!(state->jokers[i].flags & 1u) && state->jokers[i].center_id == BALATRO_CENTER_J_HALLUCINATION) {
-                (void)add_hallucination_tarot(state);
-                break;
-            }
-    }
+    for (uint8_t i = 0; i < state->joker_count; ++i)
+        if (resolves_to_hallucination(state, i)) (void)add_hallucination_tarot(state);
     /* Arcana and Spectral pack states expose a hand so targeted consumables
        can be used. Their state-update handlers call draw_from_deck_to_hand;
        the other three pack kinds do not. */
