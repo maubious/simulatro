@@ -813,7 +813,7 @@ static int find_discard_card(const BalatroState *state, uint16_t sort_id) {
     return -1;
 }
 
-static void apply_drawn_to_hand_boss(BalatroState *state) {
+static void apply_drawn_to_hand_boss(BalatroState *state, int crimson_prepped) {
     if (state->blind_disabled) return;
     if (state->blind_id == BALATRO_BLIND_BL_FINAL_BELL && state->hand_count) {
         for (uint8_t i = 0; i < state->hand_count; ++i)
@@ -830,7 +830,7 @@ static void apply_drawn_to_hand_boss(BalatroState *state) {
         }
         size_t sorted_index = (size_t)floor(balatro_pseudorandom(state, "cerulean_bell") * state->hand_count);
         state->hand[order[sorted_index]].flags |= (uint8_t)(1u << 4);
-    } else if (state->blind_id == BALATRO_BLIND_BL_FINAL_HEART && state->joker_count) {
+    } else if (crimson_prepped && state->blind_id == BALATRO_BLIND_BL_FINAL_HEART && state->joker_count) {
         uint8_t eligible[BALATRO_MAX_JOKERS], count = 0;
         /* The previously debuffed Joker is excluded when at least two cards
            exist, then all debuffs are cleared before the next target is set. */
@@ -1820,7 +1820,7 @@ static void select_blind_transition(BalatroState *state) {
     balatro_draw_to_hand(state);
     sort_hand_desc(state);
     apply_card_debuffs(state);
-    apply_drawn_to_hand_boss(state);
+    apply_drawn_to_hand_boss(state, 1);
     /* Certificate is a first-hand-drawn hook: create it directly
        in G.hand after the initial deal, then re-sorts and debuffs it. */
     if (joker_active(state, BALATRO_CENTER_J_CERTIFICATE) && state->hand_count < BALATRO_MAX_HAND) {
@@ -2038,7 +2038,7 @@ static void resolve_hand_transition(BalatroState *state, const BalatroAction *ac
     if (!state->terminal && state->phase == BALATRO_PHASE_SELECTING_HAND) {
         draw_after_play(state);
         apply_card_debuffs(state);
-        apply_drawn_to_hand_boss(state);
+        apply_drawn_to_hand_boss(state, action->type == BALATRO_ACTION_PLAY_HAND);
     }
 }
 

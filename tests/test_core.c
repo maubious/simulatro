@@ -3318,6 +3318,11 @@ static void test_source_blind_random_card_ordering(void) {
     for (uint8_t i = 0; i < heart.joker_count; ++i)
         if (i != 4) assert(!(heart.jokers[i].flags & BALATRO_CARD_DEBUFFED));
     heart.blind_chips = 1000000000;
+    BalatroAction discard = {.type = BALATRO_ACTION_DISCARD, .selection_count = 1, .selection = {0}};
+    assert(balatro_step(&heart, &discard, &result) == BALATRO_OK);
+    assert(heart.jokers[4].flags & BALATRO_CARD_DEBUFFED);
+    for (uint8_t i = 0; i < heart.joker_count; ++i)
+        if (i != 4) assert(!(heart.jokers[i].flags & BALATRO_CARD_DEBUFFED));
     play.selection[0] = 0;
     assert(balatro_step(&heart, &play, &result) == BALATRO_OK);
     assert(heart.jokers[1].flags & BALATRO_CARD_DEBUFFED);
