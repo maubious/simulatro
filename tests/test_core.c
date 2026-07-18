@@ -1557,14 +1557,6 @@ static void test_source_joker_lifecycle_hooks(void) {
     assert(balatro_sell_joker(&state, 0) == BALATRO_OK);
     assert(state.free_rerolls == 0 && state.reroll_cost == 5);
 
-    state.joker_count = state.joker_slots;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .edition = 4, .cost = 0, .sell_cost = 1};
-    assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
-    assert(state.joker_count == 6 && state.joker_slots == 6);
-    assert(balatro_sell_joker(&state, 5) == BALATRO_OK);
-    assert(state.joker_count == 5 && state.joker_slots == 5);
-
     state.joker_count = 0;
     state.consumable_count = state.consumable_slots;
     state.shop_count = 1;
@@ -1711,6 +1703,35 @@ static void test_source_joker_lifecycle_hooks(void) {
     hermit.consumables[0].center_id = BALATRO_CENTER_C_HERMIT;
     assert(balatro_step(&hermit, &use_wheel, &result) == BALATRO_OK);
     assert(hermit.dollars == -5);
+}
+
+static void test_full_joker_slots_accept_negative_shop_joker(void) {
+    BalatroConfig config;
+    balatro_default_config(&config);
+    BalatroState state;
+    assert(balatro_init_seed_string(&state, &config, "NEGATIVE_FULL_SLOTS") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SHOP;
+    state.dollars = 100;
+    state.joker_count = state.joker_slots;
+    state.shop_count = 1;
+    state.shop_cards[0] = (BalatroCard){
+        .center_id = BALATRO_CENTER_J_JOKER,
+        .edition = BALATRO_EDITION_NEGATIVE,
+        .cost = 4,
+        .sell_cost = 1,
+    };
+
+    BalatroAction actions[BALATRO_MAX_LEGAL_ACTIONS];
+    int count = legal_actions(&state, actions, BALATRO_MAX_LEGAL_ACTIONS);
+    int buy_index = -1;
+    for (int i = 0; i < count; ++i)
+        if (actions[i].type == BALATRO_ACTION_BUY_CARD && actions[i].primary == 0) buy_index = i;
+    assert(buy_index >= 0);
+
+    BalatroStepResult result;
+    assert(balatro_step(&state, &actions[buy_index], &result) == BALATRO_OK);
+    assert(state.joker_count == 6 && state.joker_slots == 6);
+    assert(state.jokers[5].edition == BALATRO_EDITION_NEGATIVE);
 }
 
 static void test_source_verdant_leaf_sale_disables_blind(void) {
@@ -4143,6 +4164,7 @@ int main(void) {
     test_source_magic_trick_shop_playing_cards();
     test_source_credit_card_shop_affordability();
     test_source_large_and_nonfinite_scores();
+    test_full_joker_slots_accept_negative_shop_joker();
     test_state();
     test_legal_view();
     test_clone_hash_and_snapshots();

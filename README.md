@@ -2,7 +2,7 @@
 
 A fast C simulator of Balatro with Python bindings.
 
-Requires [Balatrobot](https://github.com/maubious/balatrobot) commit [`679306434889b51f0d313d5f89bddc0a962b0289`](https://github.com/maubious/balatrobot/commit/679306434889b51f0d313d5f89bddc0a962b0289).
+Requires [Balatrobot](https://github.com/maubious/balatrobot) commit [`8262625e229a27f6cfc5bb146081c847d6815e78`](https://github.com/maubious/balatrobot/commit/8262625e229a27f6cfc5bb146081c847d6815e78).
 
 ## Observation space
 
