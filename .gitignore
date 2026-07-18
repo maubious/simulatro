@@ -1,0 +1,59 @@
+# Dependencies and local environments
+third_party/
+.venv/
+.venv-*/
+
+# Build and packaging output
+build/
+build-*/
+dist/
+*.egg-info/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.a
+*.dll
+*.dylib
+*.o
+*.obj
+*.so
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime, validation, and profiling output
+logs/
+runs/
+traces/
+reports/
+*.jkr
+*.log
+gmon.out
+perf.data*
+*.gcda
+*.gcno
+*.profdata
+*.profraw
+
+# Documentation: keep only README files
+*.md
+!README.md
+!**/README.md
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
