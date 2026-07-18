@@ -3463,6 +3463,7 @@ static void test_source_chicot_disables_setup_penalties(void) {
         state.joker_count = 1;
         state.jokers[0].center_id = BALATRO_CENTER_J_CHICOT;
         double ordinary_target = balatro_blind_target(state.ante, state.blind_on_deck, state.stake_scaling);
+        if (bosses[i] == BALATRO_BLIND_BL_NEEDLE) ordinary_target /= 2;
         BalatroAction select = {.type = BALATRO_ACTION_SELECT_BLIND};
         BalatroStepResult result;
         assert(balatro_step(&state, &select, &result) == BALATRO_OK);

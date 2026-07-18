@@ -1697,7 +1697,9 @@ static void select_blind_transition(BalatroState *state) {
     state->chips = 0;
     state->blind_chips = balatro_blind_target(state->ante, state->blind_on_deck, state->stake_scaling);
     if (state->config.deck == BALATRO_CENTER_B_PLASMA) state->blind_chips *= 2;
-    if (state->blind_id == BALATRO_BLIND_BL_WALL)
+    if (state->blind_id == BALATRO_BLIND_BL_NEEDLE)
+        state->blind_chips /= 2;
+    else if (state->blind_id == BALATRO_BLIND_BL_WALL)
         state->blind_chips *= 2;
     else if (state->blind_id == BALATRO_BLIND_BL_FINAL_VESSEL)
         state->blind_chips *= 3;
