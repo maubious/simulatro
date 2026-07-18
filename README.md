@@ -68,3 +68,20 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+## Live heuristic through BalatroBot
+
+With Balatro running the pinned BalatroBot mod, the heuristic can drive a
+seeded live game while keeping the native simulator as a checked shadow state:
+
+```sh
+PYTHONPATH=python python tools/heuristic_baseline.py \
+  --balatrobot http://127.0.0.1:12346 \
+  --library build/libbalatro.so \
+  --live-deck RED --stake WHITE --seed HEURISTIC1 --trace
+```
+
+Omit `--seed` for a random live seed and omit the URL to use the default
+BalatroBot endpoint. The hook stops with a diagnostic if the live and native
+states diverge. The bridge also exposes `run_policy(client, callback)` for
+other action-record policies.

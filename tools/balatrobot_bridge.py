@@ -97,6 +97,39 @@ def replay(client: BalatroBotClient, actions: Iterable[dict[str, Any]]) -> list[
     return states
 
 
+def run_policy(
+    client: BalatroBotClient,
+    policy: Callable[[dict[str, Any]], dict[str, Any] | None],
+    *,
+    state: dict[str, Any] | None = None,
+    max_steps: int = 20_000,
+    on_step: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Drive a live BalatroBot game with an action-record callback.
+
+    ``policy`` receives the latest ``gamestate`` result and returns the same
+    compact action record accepted by :func:`replay`. Returning ``None``
+    stops without issuing another action. Endpoint calls normally return the
+    next game state directly; older endpoints are supported by polling once.
+    """
+    current = state if state is not None else client.gamestate()
+    for _ in range(max_steps):
+        if current.get("state") == "GAME_OVER":
+            return current
+        record = policy(current)
+        if record is None:
+            return current
+        method, params = action_to_rpc(
+            int(record["type"]), selection=record.get("selection", ()),
+            primary=int(record.get("primary", 0)), order=record.get("order"),
+        )
+        result = client.call(method, params)
+        current = result if isinstance(result, dict) else client.gamestate()
+        if on_step is not None:
+            on_step(record, current)
+    raise RuntimeError(f"BalatroBot policy exceeded {max_steps} actions")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:12346")

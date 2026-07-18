@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tools.balatrobot_bridge import action_to_rpc, replay
+from tools.balatrobot_bridge import action_to_rpc, replay, run_policy
 
 
 class FakeClient:
@@ -53,3 +53,36 @@ def test_replay_executes_jsonl_records_and_collects_states() -> None:
         ("rearrange", {"jokers": [1, 0]}),
     ]
     assert states == [{"step": 1}, {"step": 2}, {"step": 3}]
+
+
+def test_run_policy_drives_returned_states_until_game_over() -> None:
+    class LiveClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def gamestate(self) -> dict:
+            return {"state": "BLIND_SELECT", "step": 0}
+
+        def call(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            if method == "select":
+                return {"state": "SELECTING_HAND", "step": 1}
+            return {"state": "GAME_OVER", "step": 2, "won": True}
+
+    client = LiveClient()
+
+    def policy(state: dict) -> dict:
+        if state["state"] == "BLIND_SELECT":
+            return {"type": 2}
+        return {"type": 0, "selection": [0, 1]}
+
+    final = run_policy(client, policy)
+    assert client.calls == [("select", {}), ("play", {"cards": [0, 1]})]
+    assert final == {"state": "GAME_OVER", "step": 2, "won": True}
+
+
+def test_run_policy_can_stop_without_an_action() -> None:
+    client = FakeClient()
+    final = run_policy(client, lambda state: None, state={"state": "SHOP"})
+    assert final == {"state": "SHOP"}
+    assert client.calls == []
