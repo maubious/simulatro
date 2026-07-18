@@ -638,9 +638,11 @@ static void test_shaped_reward_progress(void) {
     BalatroStepResult result;
     assert(balatro_step(&state, &play, &result) == BALATRO_OK);
     /* Crossing a blind boundary must produce a positive training signal even
-       though the public sparse win reward remains zero. */
+       though the public sparse win reward remains zero.  The shaped reward is
+       intentionally bounded; terminal outcomes, not one blind transition,
+       carry the dominant scale. */
     assert(result.sparse_reward == 0.0f);
-    assert(result.reward > 0.5f);
+    assert(result.reward > 0.0f);
 }
 
 static void test_observation_layout(void) {

@@ -1606,15 +1606,19 @@ static void finish_blind(BalatroState *state) {
     state->blind_disabled = 1;
 }
 
-/* A training-only potential that tracks actual run progress.  The old shaped
-   reward used the raw chip delta, which becomes negative when a defeated
-   blind is cleared and chips are reset for the next blind.  It also rewarded
-   skipping a blind because blind_on_deck advances for both skips and wins.
-   Keep this potential independent of card identity/economy so it cannot alter
+/* A bounded training potential tied to the actual objective.  The old shaped
+   reward used raw chip and money deltas, which makes spending money look bad
+   and makes a successful blind look bad when chips reset for the next one.
+   Keep the potential independent of card identity/economy so it cannot alter
    game rules or the sparse evaluation metric. */
 static double progress_potential(const BalatroState *state) {
+    const double target_blinds = (double)((state->config.win_ante > 1 ?
+        state->config.win_ante - 1 : 1) * 3 + 2);
     double completed = state->ante > 0 ? (double)(state->ante - 1) * 3.0 : 0.0;
     if (state->blind_on_deck <= 2) completed += (double)state->blind_on_deck;
+    double stage = completed / target_blinds;
+    if (stage < 0.0) stage = 0.0;
+    if (stage > 1.0) stage = 1.0;
     double fraction = 0.0;
     if (state->phase == BALATRO_PHASE_SELECTING_HAND && state->blind_chips > 0) {
         fraction = state->chips / state->blind_chips;
@@ -1622,13 +1626,9 @@ static double progress_potential(const BalatroState *state) {
         if (fraction < 0.0) fraction = 0.0;
         if (fraction > 1.0) fraction = 1.0;
     }
-    /* Leave a small, observable increment for crossing the blind boundary. */
-    double potential = completed + 0.8 * fraction;
-    if (state->won)
-        potential += 1.0;
-    else if (state->terminal)
-        potential -= 1.0;
-    return potential;
+    /* Stage dominates the small within-blind score signal, so resetting chips
+       after a successful blind remains net positive. */
+    return 2.0 * stage + 0.05 * fraction;
 }
 
 static void remove_joker_at(BalatroState *state, uint8_t index) {
@@ -2222,7 +2222,6 @@ static int balatro_step_impl(BalatroState *state, const BalatroAction *action, B
     if (!trusted && !state_layout_valid(state)) return BALATRO_ERR_INVARIANT;
     if (!trusted && !action_is_legal(state, action)) return BALATRO_ERR_ACTION;
     double previous_progress = progress_potential(state);
-    int32_t previous_dollars = state->dollars;
     state->actions_taken++;
     apply_action_transition(state, action);
     out->terminal = state->terminal;
@@ -2231,16 +2230,17 @@ static int balatro_step_impl(BalatroState *state, const BalatroAction *action, B
     out->sparse_reward = state->won ? 1.0f : 0.0f;
     out->reward = out->sparse_reward;
     if (state->config.shaped_reward) {
-        double progress_delta = progress_potential(state) - previous_progress;
+        double next_progress = progress_potential(state);
+        double progress_delta = next_progress - previous_progress;
         /* Skipping is a valid strategic action, but it is not blind
            completion.  Do not leak a positive progress reward for it. */
         if (action->type == BALATRO_ACTION_SKIP_BLIND && progress_delta > 0.0) progress_delta = 0.0;
-        double money_delta = (double)(state->dollars - previous_dollars) / 100.0;
-        if (progress_delta > 1.0) progress_delta = 1.0;
-        if (progress_delta < -1.0) progress_delta = -1.0;
-        if (money_delta > 1.0) money_delta = 1.0;
-        if (money_delta < -1.0) money_delta = -1.0;
-        out->reward += (float)(progress_delta + 0.02 * money_delta);
+        if (progress_delta > 0.25) progress_delta = 0.25;
+        if (progress_delta < -0.25) progress_delta = -0.25;
+        /* Make the actual objective dominate shaping.  sparse_reward remains
+           the public win-only metric for evaluation and compatibility. */
+        out->reward = state->terminal ? (state->won ? 5.0f : -5.0f) : 0.0f;
+        out->reward += (float)progress_delta;
     }
     return BALATRO_OK;
 }
