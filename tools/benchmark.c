@@ -39,10 +39,15 @@ typedef struct BenchStats {
 typedef enum BenchMode {
     BENCH_LIFECYCLE,
     BENCH_LEGAL,
+    BENCH_LEGAL_MASKS,
     BENCH_CLONE,
     BENCH_PLAY,
+    BENCH_SCORE_PLAYS,
     BENCH_OBSERVE,
-    BENCH_OBSERVE_COMPLEX
+    BENCH_OBSERVE_COMPLEX,
+    BENCH_OBSERVE_RL,
+    BENCH_OBSERVE_RL_COMPLEX,
+    BENCH_STEP_OBSERVE_RL
 } BenchMode;
 
 static volatile uint64_t benchmark_sink;
@@ -140,65 +145,67 @@ static int policy_selection(const BalatroObservedSelection *legal, uint8_t wante
     return BALATRO_OK;
 }
 
-static int find_observation_action(const BalatroObservation *observation, uint8_t type, BalatroPolicyAction *out, int maximum_selection) {
-    if (type >= BALATRO_ACTION_TYPE_COUNT || !observation->legal.action_type[type]) return BALATRO_ERR_ACTION;
+static int find_masks_action(const BalatroLegalMasks *legal, uint8_t type,
+                             BalatroPolicyAction *out, int maximum_selection) {
+    if (type >= BALATRO_ACTION_TYPE_COUNT || !legal->action_type[type]) return BALATRO_ERR_ACTION;
     *out = (BalatroPolicyAction){.type = type, .reorder_destination = UINT16_MAX};
-    int primary = first_mask_index(observation->legal.primary[type]);
+    int primary = first_mask_index(legal->primary[type]);
     if (primary < 0) return BALATRO_ERR_ACTION;
     out->primary = (uint16_t)primary;
     const BalatroObservedSelection *selection = NULL;
     if (type == BALATRO_ACTION_PLAY_HAND)
-        selection = &observation->legal.play;
+        selection = &legal->play;
     else if (type == BALATRO_ACTION_DISCARD)
-        selection = &observation->legal.discard;
+        selection = &legal->discard;
     else if (type == BALATRO_ACTION_USE_CONSUMABLE)
-        selection = &observation->legal.consumable[primary];
+        selection = &legal->consumable[primary];
     else if (type == BALATRO_ACTION_BUY_AND_USE)
-        selection = &observation->legal.shop[primary];
+        selection = &legal->shop[primary];
     else if (type == BALATRO_ACTION_PICK_PACK_CARD)
-        selection = &observation->legal.pack[primary];
+        selection = &legal->pack[primary];
     if (selection && selection->valid)
         return policy_selection(selection, maximum_selection ? selection->maximum : selection->minimum, out);
     return BALATRO_OK;
 }
 
-static int choose_lifecycle_observation_action(const BalatroState *state, const BalatroObservation *observation, unsigned episode,
-                                               BalatroPolicyAction *out) {
+static int choose_lifecycle_masks_action(const BalatroState *state, const BalatroLegalMasks *legal,
+                                         unsigned episode, BalatroPolicyAction *out) {
     if (state->phase == BALATRO_PHASE_BLIND_SELECT) {
-        if (episode % 11 == 0 && find_observation_action(observation, BALATRO_ACTION_SKIP_BLIND, out, 0) == BALATRO_OK)
+        if (episode % 11 == 0 && find_masks_action(legal, BALATRO_ACTION_SKIP_BLIND, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        return find_observation_action(observation, BALATRO_ACTION_SELECT_BLIND, out, 0);
+        return find_masks_action(legal, BALATRO_ACTION_SELECT_BLIND, out, 0);
     }
     if (state->phase == BALATRO_PHASE_SELECTING_HAND) {
-        if (state->actions_taken % 13 == 0 && find_observation_action(observation, BALATRO_ACTION_USE_CONSUMABLE, out, 0) == BALATRO_OK)
+        if (state->actions_taken % 13 == 0 && find_masks_action(legal, BALATRO_ACTION_USE_CONSUMABLE, out, 0) == BALATRO_OK)
             return BALATRO_OK;
         if (state->discards_left && state->actions_taken % 5 == 0 &&
-            find_observation_action(observation, BALATRO_ACTION_DISCARD, out, 0) == BALATRO_OK)
+            find_masks_action(legal, BALATRO_ACTION_DISCARD, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        if (find_observation_action(observation, BALATRO_ACTION_PLAY_HAND, out, 1) == BALATRO_OK) return BALATRO_OK;
-        return find_observation_action(observation, BALATRO_ACTION_DISCARD, out, 0);
+        if (find_masks_action(legal, BALATRO_ACTION_PLAY_HAND, out, 1) == BALATRO_OK) return BALATRO_OK;
+        return find_masks_action(legal, BALATRO_ACTION_DISCARD, out, 0);
     }
     if (state->phase == BALATRO_PHASE_ROUND_EVAL)
-        return find_observation_action(observation, BALATRO_ACTION_CASH_OUT, out, 0);
+        return find_masks_action(legal, BALATRO_ACTION_CASH_OUT, out, 0);
     if (state->phase == BALATRO_PHASE_PACK_OPENING) {
-        if (state->actions_taken % 9 == 0 && find_observation_action(observation, BALATRO_ACTION_SKIP_PACK, out, 0) == BALATRO_OK)
+        if (state->actions_taken % 9 == 0 && find_masks_action(legal, BALATRO_ACTION_SKIP_PACK, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        if (find_observation_action(observation, BALATRO_ACTION_PICK_PACK_CARD, out, 0) == BALATRO_OK) return BALATRO_OK;
-        return find_observation_action(observation, BALATRO_ACTION_SKIP_PACK, out, 0);
+        if (find_masks_action(legal, BALATRO_ACTION_PICK_PACK_CARD, out, 0) == BALATRO_OK) return BALATRO_OK;
+        return find_masks_action(legal, BALATRO_ACTION_SKIP_PACK, out, 0);
     }
     if (state->phase == BALATRO_PHASE_SHOP) {
-        if (state->actions_taken % 17 == 0 && find_observation_action(observation, BALATRO_ACTION_SELL_JOKER, out, 0) == BALATRO_OK)
+        if (state->actions_taken % 17 == 0 && find_masks_action(legal, BALATRO_ACTION_SELL_JOKER, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        if (state->actions_taken % 7 == 0 && find_observation_action(observation, BALATRO_ACTION_REROLL, out, 0) == BALATRO_OK)
+        if (state->actions_taken % 7 == 0 && find_masks_action(legal, BALATRO_ACTION_REROLL, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        if (state->actions_taken % 3 == 0 && find_observation_action(observation, BALATRO_ACTION_REDEEM_VOUCHER, out, 0) == BALATRO_OK)
+        if (state->actions_taken % 3 == 0 && find_masks_action(legal, BALATRO_ACTION_REDEEM_VOUCHER, out, 0) == BALATRO_OK)
             return BALATRO_OK;
-        if (find_observation_action(observation, BALATRO_ACTION_BUY_CARD, out, 0) == BALATRO_OK) return BALATRO_OK;
-        if (find_observation_action(observation, BALATRO_ACTION_OPEN_BOOSTER, out, 0) == BALATRO_OK) return BALATRO_OK;
-        return find_observation_action(observation, BALATRO_ACTION_NEXT_ROUND, out, 0);
+        if (find_masks_action(legal, BALATRO_ACTION_BUY_CARD, out, 0) == BALATRO_OK) return BALATRO_OK;
+        if (find_masks_action(legal, BALATRO_ACTION_OPEN_BOOSTER, out, 0) == BALATRO_OK) return BALATRO_OK;
+        return find_masks_action(legal, BALATRO_ACTION_NEXT_ROUND, out, 0);
     }
     return BALATRO_ERR_ACTION;
 }
+
 
 static unsigned parse_u32(const char *value, const char *name) {
     char *end = NULL;
@@ -273,6 +280,21 @@ static int benchmark_legal(const BalatroConfig *config, unsigned iterations) {
     return 0;
 }
 
+static int benchmark_legal_masks(const BalatroConfig *config, unsigned iterations) {
+    BalatroState state;
+    prepare_selecting_state(&state, config);
+    BalatroLegalMasks masks;
+    clock_t begin = clock();
+    for (unsigned i = 0; i < iterations; ++i) {
+        if (balatro_legal_masks(&state, &masks) != BALATRO_OK) return 1;
+        benchmark_sink += masks.primary[i % BALATRO_ACTION_TYPE_COUNT];
+    }
+    double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+    printf("%u legal-mask builds in %.3f s (%.0f builds/s, %.3f us/build)\n",
+           iterations, elapsed, iterations / elapsed, elapsed * 1e6 / iterations);
+    return 0;
+}
+
 static int benchmark_clone(const BalatroConfig *config, unsigned iterations) {
     BalatroState source, destination;
     prepare_selecting_state(&source, config);
@@ -287,7 +309,7 @@ static int benchmark_clone(const BalatroConfig *config, unsigned iterations) {
     return balatro_state_hash(&source) == balatro_state_hash(&destination) ? 0 : 1;
 }
 
-static int benchmark_play(const BalatroConfig *config, unsigned iterations) {
+static int benchmark_play(const BalatroConfig *config, unsigned iterations, int score_only) {
     BalatroState state;
     prepare_selecting_state(&state, config);
     BalatroAction all[BALATRO_MAX_LEGAL_ACTIONS];
@@ -301,36 +323,56 @@ static int benchmark_play(const BalatroConfig *config, unsigned iterations) {
             plays[play_count++] = all[i];
     clock_t begin = clock();
     for (unsigned i = 0; i < iterations; ++i) {
-        int error = balatro_score_play_actions_trusted(
-            &state, plays, play_count, scores);
+        int error = score_only ? balatro_score_plays(&state, plays, play_count, scores)
+                               : balatro_score_play_actions_trusted(&state, plays, play_count, scores);
         if (error) return 1;
         double score = scores[i % play_count];
         benchmark_sink += isfinite(score) ? (uint64_t)fmod(score, 4294967291.0) : 0;
     }
     double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
     double branches = (double)iterations * play_count;
-    printf("%.0f trusted play branches in %.3f s (%.0f branches/s; %zu actions/batch)\n",
-        branches, elapsed, branches / elapsed, play_count);
+    printf("%.0f %s play branches in %.3f s (%.0f branches/s; %zu actions/batch)\n",
+        branches, score_only ? "score-only" : "trusted", elapsed, branches / elapsed, play_count);
+    return 0;
+}
+
+static void make_complex_deck(BalatroState *state) {
+    unsigned ordinal = 0;
+    BalatroCard *areas[] = {state->deck, state->hand, state->discard};
+    const uint16_t counts[] = {state->deck_count, state->hand_count, state->discard_count};
+    for (size_t area = 0; area < sizeof(areas) / sizeof(areas[0]); ++area)
+        for (uint16_t i = 0; i < counts[area]; ++i, ++ordinal) {
+            BalatroCard *card = &areas[area][i];
+            card->enhancement = (uint8_t)(ordinal % (BALATRO_ENHANCEMENT_LUCKY + 1));
+            card->edition = (uint8_t)(ordinal % (BALATRO_EDITION_NEGATIVE + 1));
+            card->seal = (uint8_t)(ordinal % (BALATRO_SEAL_PURPLE + 1));
+            card->perma_bonus = (int16_t)((int)(ordinal % 15) - 7);
+            card->state[3] = (int32_t)(ordinal & 1u);
+        }
+}
+
+static int benchmark_observation_rl(const BalatroConfig *config, unsigned iterations, int complex_deck) {
+    BalatroState state;
+    prepare_selecting_state(&state, config);
+    if (complex_deck) make_complex_deck(&state);
+    BalatroCompactObservation observation;
+    BalatroLegalMasks legal;
+    clock_t begin = clock();
+    for (unsigned i = 0; i < iterations; ++i) {
+        if (balatro_observe_rl(&state, &observation, &legal) != BALATRO_OK) return 1;
+        benchmark_sink += observation.variants.count + legal.action_type[i % BALATRO_ACTION_TYPE_COUNT];
+    }
+    double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+    printf("%u %s RL observations in %.3f s (%.0f observations/s, %.3f us/observation)\n",
+           iterations, complex_deck ? "heterogeneous" : "ordinary", elapsed,
+           iterations / elapsed, elapsed * 1e6 / iterations);
     return 0;
 }
 
 static int benchmark_observation(const BalatroConfig *config, unsigned iterations, int complex_deck) {
     BalatroState state;
     prepare_selecting_state(&state, config);
-    if (complex_deck) {
-        unsigned ordinal = 0;
-        BalatroCard *areas[] = {state.deck, state.hand, state.discard};
-        const uint16_t counts[] = {state.deck_count, state.hand_count, state.discard_count};
-        for (size_t area = 0; area < sizeof(areas) / sizeof(areas[0]); ++area)
-            for (uint16_t i = 0; i < counts[area]; ++i, ++ordinal) {
-                BalatroCard *card = &areas[area][i];
-                card->enhancement = (uint8_t)(ordinal % (BALATRO_ENHANCEMENT_LUCKY + 1));
-                card->edition = (uint8_t)(ordinal % (BALATRO_EDITION_NEGATIVE + 1));
-                card->seal = (uint8_t)(ordinal % (BALATRO_SEAL_PURPLE + 1));
-                card->perma_bonus = (int16_t)((int)(ordinal % 15) - 7);
-                card->state[3] = (int32_t)(ordinal & 1u);
-            }
-    }
+    if (complex_deck) make_complex_deck(&state);
     BalatroObservation observation;
     clock_t begin = clock();
     for (unsigned i = 0; i < iterations; ++i) {
@@ -375,10 +417,15 @@ int main(int argc, char **argv) {
             const char *value = argv[++i];
             if (!strcmp(value, "lifecycle")) mode = BENCH_LIFECYCLE;
             else if (!strcmp(value, "legal")) mode = BENCH_LEGAL;
+            else if (!strcmp(value, "legal-masks")) mode = BENCH_LEGAL_MASKS;
             else if (!strcmp(value, "clone")) mode = BENCH_CLONE;
             else if (!strcmp(value, "play")) mode = BENCH_PLAY;
+            else if (!strcmp(value, "score-plays")) mode = BENCH_SCORE_PLAYS;
             else if (!strcmp(value, "observe")) mode = BENCH_OBSERVE;
             else if (!strcmp(value, "observe-complex")) mode = BENCH_OBSERVE_COMPLEX;
+            else if (!strcmp(value, "observe-rl")) mode = BENCH_OBSERVE_RL;
+            else if (!strcmp(value, "observe-rl-complex")) mode = BENCH_OBSERVE_RL_COMPLEX;
+            else if (!strcmp(value, "step-observe-rl")) mode = BENCH_STEP_OBSERVE_RL;
             else {
                 fprintf(stderr, "invalid mode: %s\n", value);
                 return 2;
@@ -389,18 +436,27 @@ int main(int argc, char **argv) {
             config.win_ante = (uint8_t)(value < 1 ? 1 : value > 255 ? 255 : value);
         } else if (!strcmp(argv[i], "--seed")) seed_base = parse_u32(argv[++i], "seed");
         else {
-            fprintf(stderr, "usage: %s [--mode lifecycle|legal|clone|play|observe|observe-complex] [--iterations N] [--observe] [--trusted] [--episodes N] [--max-steps N] [--win-ante N] [--seed N]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--mode lifecycle|legal|legal-masks|clone|play|score-plays|observe|observe-complex|observe-rl|observe-rl-complex|step-observe-rl] [--iterations N] [--observe] [--trusted] [--episodes N] [--max-steps N] [--win-ante N] [--seed N]\n", argv[0]);
             return 2;
         }
     }
+    printf("sizes: state=%zu observation=%zu compact=%zu legal_masks=%zu legal_view=%zu card=%zu\n",
+           sizeof(BalatroState), sizeof(BalatroObservation), sizeof(BalatroCompactObservation),
+           sizeof(BalatroLegalMasks), sizeof(BalatroLegalView), sizeof(BalatroCard));
     if (mode == BENCH_LEGAL)
         return benchmark_legal(&config, iterations ? iterations : 10000);
+    if (mode == BENCH_LEGAL_MASKS)
+        return benchmark_legal_masks(&config, iterations ? iterations : 1000000);
     if (mode == BENCH_CLONE)
         return benchmark_clone(&config, iterations ? iterations : 5000000);
-    if (mode == BENCH_PLAY)
-        return benchmark_play(&config, iterations ? iterations : 10000);
+    if (mode == BENCH_PLAY || mode == BENCH_SCORE_PLAYS)
+        return benchmark_play(&config, iterations ? iterations : 10000, mode == BENCH_SCORE_PLAYS);
     if (mode == BENCH_OBSERVE || mode == BENCH_OBSERVE_COMPLEX)
         return benchmark_observation(&config, iterations ? iterations : 1000000, mode == BENCH_OBSERVE_COMPLEX);
+    if (mode == BENCH_OBSERVE_RL || mode == BENCH_OBSERVE_RL_COMPLEX)
+        return benchmark_observation_rl(&config, iterations ? iterations : 1000000,
+                                        mode == BENCH_OBSERVE_RL_COMPLEX);
+    int rl_observe = mode == BENCH_STEP_OBSERVE_RL;
     clock_t begin = clock();
 
     for (unsigned episode = 0; episode < episodes; ++episode) {
@@ -408,7 +464,14 @@ int main(int argc, char **argv) {
         if (balatro_init(&state, &config, (uint64_t)seed_base + episode) != BALATRO_OK) return 1;
         stats.episodes++;
         BalatroObservation observation;
-        if (observe) {
+        BalatroCompactObservation compact_observation;
+        BalatroLegalMasks legal_masks;
+        if (rl_observe) {
+            int observation_error = balatro_observe_rl(&state, &compact_observation, &legal_masks);
+            if (observation_error != BALATRO_OK) return 1;
+            stats.observation_calls++;
+            stats.observation_bytes += sizeof(compact_observation);
+        } else if (observe) {
             int observation_error = balatro_observe(&state, &observation);
             if (observation_error != BALATRO_OK) return 1;
             account_observation(&stats, &observation);
@@ -416,9 +479,23 @@ int main(int argc, char **argv) {
         for (unsigned step = 0; step < max_steps && !state.terminal; ++step) {
             BalatroAction chosen;
             int error;
-            if (observe) {
+            if (rl_observe) {
                 BalatroPolicyAction policy;
-                if (choose_lifecycle_observation_action(&state, &observation, episode, &policy)) {
+                if (choose_lifecycle_masks_action(&state, &legal_masks, episode, &policy)) {
+                    fprintf(stderr, "no RL observation action: episode=%u step=%u phase=%u\n", episode, step, state.phase);
+                    return 1;
+                }
+                chosen = (BalatroAction){.type = policy.type};
+                error = trusted ? balatro_step_observe_rl_trusted(&state, &policy, &result, &compact_observation, &legal_masks)
+                                : balatro_step_observe_rl(&state, &policy, &result, &compact_observation, &legal_masks);
+                if (!error) {
+                    stats.observation_calls++;
+                    stats.observation_bytes += sizeof(compact_observation);
+                    benchmark_sink += compact_observation.variants.count;
+                }
+            } else if (observe) {
+                BalatroPolicyAction policy;
+                if (choose_lifecycle_masks_action(&state, &observation.legal, episode, &policy)) {
                     fprintf(stderr, "no observation action: episode=%u step=%u phase=%u\n", episode, step, state.phase);
                     return 1;
                 }
@@ -478,7 +555,7 @@ int main(int argc, char **argv) {
     double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
     printf("%u lifecycle episodes in %.3f s (%.0f episodes/s, %.0f steps/s; win_ante=%u; observe=%s; trusted=%s)\n",
         stats.episodes, elapsed, stats.episodes / elapsed, stats.steps / elapsed,
-        config.win_ante, observe ? "on" : "off", trusted ? "on" : "off");
+        config.win_ante, rl_observe ? "rl" : observe ? "legacy" : "off", trusted ? "on" : "off");
     printf("accepted steps: %u; selects: %u; skips: %u; scored hands: %u; discards: %u; uses: %u; cashouts: %u; next rounds: %u; packs: %u; skipped packs: %u; buys: %u; sells: %u; vouchers: %u; rerolls: %u; terminals: %u; wins: %u; max ante: %u; action overflows: %u\n",
         stats.steps, stats.selected_blinds, stats.skipped_blinds, stats.scored_hands, stats.discards,
         stats.consumable_uses, stats.shops, stats.next_rounds, stats.packs, stats.skipped_packs, stats.buys, stats.sells,
@@ -487,10 +564,11 @@ int main(int argc, char **argv) {
         stats.sparse_reward, stats.shaped_reward,
         stats.episodes ? (double)stats.terminals / stats.episodes : 0.0,
         stats.episodes ? (double)stats.wins / stats.episodes : 0.0);
-    if (observe)
+    if (observe || rl_observe)
         printf("observation profile: cards=%u variants=%u hand=%u jokers=%u consumables=%u tags=%u vouchers=%u; bytes=%zu; calls=%u; overflows=%u; observed maxima: cards=%u variants=%u hand=%u\n",
             config.observation.playing_cards, config.observation.playing_variants, config.observation.hand, config.observation.jokers,
-            config.observation.consumables, config.observation.tags, config.observation.shop_vouchers, sizeof(BalatroObservation),
+            config.observation.consumables, config.observation.tags, config.observation.shop_vouchers,
+            rl_observe ? sizeof(BalatroCompactObservation) : sizeof(BalatroObservation),
             stats.observation_calls, stats.observation_overflows, stats.max_observed_cards, stats.max_observed_variants,
             stats.max_observed_hand);
     return 0;

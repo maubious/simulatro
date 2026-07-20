@@ -15,6 +15,14 @@ enum BalatroCenterSet {
     SET_BOOSTER = 8
 };
 
+static inline uint16_t balatro_playing_card_count(const BalatroState *state) {
+    return (uint16_t)(state->deck_count + state->hand_count + state->discard_count);
+}
+
+static inline int balatro_can_add_playing_cards(const BalatroState *state, uint16_t count) {
+    return (uint32_t)balatro_playing_card_count(state) + count <= BALATRO_OBS_MAX_PLAYING_CARDS;
+}
+
 typedef struct BalatroKeyBuilder {
     char *data;
     size_t capacity;
@@ -54,4 +62,40 @@ void balatro_consumable_added(BalatroState *state, const BalatroCard *card);
 void balatro_consumable_removed(BalatroState *state, const BalatroCard *card);
 void balatro_playing_card_added(BalatroState *state, uint8_t count);
 void balatro_clear_card_debuffs(BalatroState *state);
+void balatro_refresh_joker_cache(BalatroState *state);
+int balatro_joker_active(const BalatroState *state, uint16_t center_id);
+int balatro_action_is_legal(const BalatroState *state, const BalatroAction *action);
+int balatro_state_layout_valid(const BalatroState *state);
+int add_pooled_consumable(BalatroState *state, uint8_t set, const char *append, uint8_t edition);
+int add_specific_consumable(BalatroState *state, uint16_t center_id);
+int add_joker_rarity(BalatroState *state, uint8_t rarity, const char *append, int legendary);
+void remove_joker_at(BalatroState *state, uint8_t index);
+void remove_hand_index(BalatroState *state, uint8_t index);
+uint8_t random_sorted_hand_index(BalatroState *state, const char *stream);
+void add_spectral_cards(BalatroState *state, const uint8_t *ranks, size_t rank_count, uint8_t count, const char *stream);
+double balatro_probability_normal(const BalatroState *state, double base);
+void sort_hand_desc(BalatroState *state);
+void refresh_card_debuff(const BalatroState *state, BalatroCard *card);
+void apply_consumable(BalatroState *state, const BalatroAction *action, BalatroCard card);
+void use_consumable(BalatroState *state, const BalatroAction *action);
+void sell_consumable(BalatroState *state, uint8_t index);
+void reset_round_rerolls(BalatroState *state);
+void choose_orbital_hands(BalatroState *state);
+void assign_blind_tags(BalatroState *state);
+void apply_skip_tag(BalatroState *state, uint8_t tag);
+void reset_round_targets(BalatroState *state);
+void draw_after_play(BalatroState *state);
+void apply_discard_effects(BalatroState *state, const BalatroCard *cards, uint8_t count, int first_discard, int hook);
+void apply_hook_discard(BalatroState *state);
+int find_discard_card(const BalatroState *state, uint16_t sort_id);
+void apply_drawn_to_hand_boss(BalatroState *state, int crimson_prepped);
+void sort_hand_mode(BalatroState *state, int by_suit);
+void apply_card_debuffs(BalatroState *state);
+void swap_jokers(BalatroState *state, uint8_t left, uint8_t right);
+int8_t blind_reward_for(uint16_t blind_id, uint8_t blind_on_deck);
+uint16_t choose_boss(BalatroState *state);
+uint8_t choose_to_do_hand(BalatroState *state, int excluded);
+void notify_removed_playing_cards(BalatroState *state, const BalatroCard *cards, uint8_t count, int shattered);
+BalatroCard random_playing_card(BalatroState *state, const char *stream);
+int blind_debuffs_card(const BalatroState *state, const BalatroCard *card);
 #endif

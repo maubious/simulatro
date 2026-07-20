@@ -82,9 +82,10 @@ static uint16_t telescope_planet(const BalatroState *state) {
     return balatro_planet_center(hand);
 }
 
-static void remove_shop(BalatroState *state, uint8_t index) {
-    memmove(&state->shop_cards[index], &state->shop_cards[index + 1], (state->shop_count - index - 1) * sizeof(BalatroCard));
-    state->shop_count--;
+static void remove_shop_booster(BalatroState *state, uint8_t index) {
+    memmove(&state->shop_boosters[index], &state->shop_boosters[index + 1],
+            (state->shop_booster_count - index - 1) * sizeof(BalatroCard));
+    state->shop_booster_count--;
 }
 
 static int open_pack_center(BalatroState *state, uint16_t center_id) {
@@ -143,11 +144,11 @@ static int open_pack_center(BalatroState *state, uint16_t center_id) {
 }
 
 int balatro_open_booster(BalatroState *state, uint8_t index) {
-    if (!state || index >= state->shop_count) return BALATRO_ERR_ACTION;
-    BalatroCard booster = state->shop_cards[index];
-    if (balatro_card_set(&booster) != SET_BOOSTER || !balatro_can_afford(state, booster.cost)) return BALATRO_ERR_ACTION;
+    if (!state || index >= state->shop_booster_count) return BALATRO_ERR_ACTION;
+    BalatroCard booster = state->shop_boosters[index];
+    if (!balatro_can_afford(state, booster.cost)) return BALATRO_ERR_ACTION;
     state->dollars -= booster.cost;
-    remove_shop(state, index);
+    remove_shop_booster(state, index);
     return open_pack_center(state, booster.center_id);
 }
 
@@ -207,7 +208,7 @@ int balatro_pick_pack_card(BalatroState *state, uint8_t index) {
         state->consumables[state->consumable_count++] = card;
         balatro_consumable_added(state, &card);
     } else if (set == SET_DEFAULT || set == SET_ENHANCED) {
-        if (state->deck_count >= BALATRO_MAX_DECK) return BALATRO_ERR_CAPACITY;
+        if (state->deck_count >= BALATRO_MAX_DECK || !balatro_can_add_playing_cards(state, 1)) return BALATRO_ERR_CAPACITY;
         /* CardArea:emplace always inserts at index 1 for a deck. */
         memmove(&state->deck[1], &state->deck[0], state->deck_count * sizeof(BalatroCard));
         state->deck[0] = card;

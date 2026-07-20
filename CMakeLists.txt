@@ -14,6 +14,11 @@ option(BALATRO_BUILD_TESTS "Build native tests" ON)
 
 set(BALATRO_SOURCES
     src/balatro.c
+    src/consumables.c
+    src/state.c
+    src/legal.c
+    src/observe.c
+    src/step.c
     src/rng.c
     src/poker.c
     src/economy.c
@@ -55,4 +60,11 @@ if(BALATRO_BUILD_TESTS)
     endif()
     target_link_libraries(test_core PRIVATE balatro_core)
     add_test(NAME core COMMAND test_core)
+    find_program(BALATRO_PYTHON3 python3)
+    find_program(BALATRO_CLANG clang)
+    if(BALATRO_PYTHON3 AND BALATRO_CLANG)
+        add_test(NAME generated_ctypes
+            COMMAND ${BALATRO_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_ctypes.py
+                    --clang ${BALATRO_CLANG} --check)
+    endif()
 endif()

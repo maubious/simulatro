@@ -15,17 +15,19 @@ def make_action(kind: int, primary: int = 0) -> Action:
     return action
 
 
-def test_action_record_maps_combined_shop_indices_to_live_areas() -> None:
+def test_action_record_preserves_area_local_shop_indices() -> None:
     state = State()
-    state.shop_count = 4
-    state.shop_cards[0].center_id = 146  # Main shop Joker.
-    state.shop_cards[1].center_id = 274  # Voucher.
-    state.shop_cards[2].center_id = 241  # Booster.
-    state.shop_cards[3].center_id = 86   # Main card appended after voucher.
+    state.shop_main_count = 2
+    state.shop_voucher_count = 1
+    state.shop_booster_count = 1
+    state.shop_main[0].center_id = 146  # Main shop Joker.
+    state.shop_main[1].center_id = 86   # Main shop consumable.
+    state.shop_vouchers[0].center_id = 274
+    state.shop_boosters[0].center_id = 241
 
-    assert action_record(state, make_action(8, 3))["primary"] == 1
-    assert action_record(state, make_action(12, 1))["primary"] == 0
-    assert action_record(state, make_action(13, 2))["primary"] == 0
+    assert action_record(state, make_action(8, 1))["primary"] == 1
+    assert action_record(state, make_action(12, 0))["primary"] == 0
+    assert action_record(state, make_action(13, 0))["primary"] == 0
 
 
 def test_action_record_expands_adjacent_reorder_to_a_permutation() -> None:

@@ -9,18 +9,6 @@
 extern "C" {
 #endif
 
-#define BALATRO_MAX_DECK 104
-#define BALATRO_MAX_HAND 16
-#define BALATRO_MAX_JOKERS 12
-#define BALATRO_MAX_CONSUMABLES 8
-#define BALATRO_MAX_SHOP_CARDS 12
-#define BALATRO_MAX_PACK_CARDS 8
-#define BALATRO_MAX_SELECTION 5
-#define BALATRO_MAX_LEGAL_ACTIONS 20000
-#define BALATRO_MAX_LEGAL_GROUPS 128
-#define BALATRO_MAX_RNG_STREAMS 256
-#define BALATRO_ACTION_TYPE_COUNT 23
-
 /* Fixed storage for the standard Ante-8 public-observation profile.  A run
    may select any smaller capacity in BalatroConfig.  These are training
    environment limits, not semantic maxima of endless Balatro. */
@@ -34,6 +22,22 @@ extern "C" {
 #define BALATRO_OBS_MAX_SHOP_VOUCHERS 64
 #define BALATRO_OBS_MAX_SHOP_BOOSTERS 2
 #define BALATRO_OBS_MAX_PACK_CARDS 5
+
+/* Live state uses the same capacity contract as the public ABI. Draw and
+   discard each need room for the full playing-card set, while additions are
+   bounded by BALATRO_OBS_MAX_PLAYING_CARDS globally. */
+#define BALATRO_MAX_DECK BALATRO_OBS_MAX_PLAYING_CARDS
+#define BALATRO_MAX_HAND BALATRO_OBS_MAX_HAND
+#define BALATRO_MAX_JOKERS BALATRO_OBS_MAX_JOKERS
+#define BALATRO_MAX_CONSUMABLES BALATRO_OBS_MAX_CONSUMABLES
+#define BALATRO_MAX_SHOP_CARDS \
+    (BALATRO_OBS_MAX_SHOP_MAIN + BALATRO_OBS_MAX_SHOP_VOUCHERS + BALATRO_OBS_MAX_SHOP_BOOSTERS)
+#define BALATRO_MAX_PACK_CARDS BALATRO_OBS_MAX_PACK_CARDS
+#define BALATRO_MAX_SELECTION 5
+#define BALATRO_MAX_LEGAL_ACTIONS 20000
+#define BALATRO_MAX_LEGAL_GROUPS 512
+#define BALATRO_MAX_RNG_STREAMS 256
+#define BALATRO_ACTION_TYPE_COUNT 23
 
 typedef enum BalatroError {
     BALATRO_OK = 0,
@@ -192,8 +196,8 @@ typedef struct BalatroSelectionFamily {
     uint8_t primary;
     uint8_t minimum;
     uint8_t maximum;
-    uint16_t allowed_mask;
-    uint16_t required_mask;
+    uint64_t allowed_mask;
+    uint64_t required_mask;
 } BalatroSelectionFamily;
 
 typedef struct BalatroLegalGroup {
@@ -287,14 +291,18 @@ typedef struct BalatroState {
     BalatroCard discard[BALATRO_MAX_DECK];
     BalatroCard jokers[BALATRO_MAX_JOKERS];
     BalatroCard consumables[BALATRO_MAX_CONSUMABLES];
-    BalatroCard shop_cards[BALATRO_MAX_SHOP_CARDS];
+    BalatroCard shop_main[BALATRO_OBS_MAX_SHOP_MAIN];
+    BalatroCard shop_vouchers[BALATRO_OBS_MAX_SHOP_VOUCHERS];
+    BalatroCard shop_boosters[BALATRO_OBS_MAX_SHOP_BOOSTERS];
     BalatroCard pack_cards[BALATRO_MAX_PACK_CARDS];
     uint16_t deck_count;
     uint8_t hand_count;
     uint16_t discard_count;
     uint8_t joker_count;
     uint8_t consumable_count;
-    uint8_t shop_count;
+    uint8_t shop_main_count;
+    uint8_t shop_voucher_count;
+    uint8_t shop_booster_count;
     uint8_t pack_count;
 
     uint8_t hand_levels[BALATRO_HAND_COUNT];
@@ -364,6 +372,8 @@ typedef struct BalatroState {
     uint16_t next_voucher_id;
     uint8_t gros_michel_extinct;
     uint16_t last_tarot_planet;
+    uint64_t joker_flags;
+    uint64_t joker_active_flags;
 } BalatroState;
 
 typedef enum BalatroPublicCardFlag {
@@ -567,6 +577,10 @@ typedef struct BalatroObservedLegality {
     uint64_t joker_reorder_destination[BALATRO_OBS_MAX_JOKERS];
 } BalatroObservedLegality;
 
+/* Dense, allocation-free legality representation used by the training API.
+   The legacy observation embeds the same layout for ABI compatibility. */
+typedef BalatroObservedLegality BalatroLegalMasks;
+
 typedef struct BalatroObservation {
     BalatroObservationProfile profile;
     uint32_t encoded_bytes;
@@ -588,6 +602,122 @@ typedef struct BalatroObservation {
     BalatroObservedPokerHands poker_hands;
     BalatroObservedLegality legal;
 } BalatroObservation;
+
+/* Packed semantic observation for high-throughput RL consumers. Unlike
+   BalatroObservation, live entries are count-prefixed AoS values, continuous
+   fields are quantized signed-log2 Q8.8, and redeemed vouchers are bit-packed.
+   The version field is the wire-format compatibility boundary. */
+#define BALATRO_COMPACT_OBSERVATION_VERSION 1
+#define BALATRO_COMPACT_ID_SCALARS 5
+#define BALATRO_COMPACT_U8_SCALARS 39
+#define BALATRO_COMPACT_U32_SCALARS 4
+#define BALATRO_COMPACT_U16_SCALARS 13
+#define BALATRO_COMPACT_Q_SCALARS 16
+#define BALATRO_COMPACT_VOUCHER_BYTES ((BALATRO_CENTER_COUNT + 7) / 8)
+
+#pragma pack(push, 1)
+typedef struct BalatroCompactGlobals {
+    uint16_t ids[BALATRO_COMPACT_ID_SCALARS];
+    uint8_t u8[BALATRO_COMPACT_U8_SCALARS];
+    uint32_t u32[BALATRO_COMPACT_U32_SCALARS];
+    uint16_t u16[BALATRO_COMPACT_U16_SCALARS];
+    int16_t q8_8[BALATRO_COMPACT_Q_SCALARS];
+    uint8_t redeemed_vouchers[BALATRO_COMPACT_VOUCHER_BYTES];
+} BalatroCompactGlobals;
+
+typedef struct BalatroCompactVariant {
+    uint8_t rank;
+    uint8_t suit;
+    uint8_t enhancement;
+    uint8_t edition;
+    uint8_t seal;
+    uint8_t flags;
+    int16_t perma_bonus_q8_8;
+    uint16_t owned_count;
+    uint16_t draw_count;
+    uint16_t hand_count;
+    uint16_t discard_count;
+} BalatroCompactVariant;
+
+typedef struct BalatroCompactVariants {
+    uint16_t count;
+    BalatroCompactVariant values[BALATRO_OBS_MAX_PLAYING_VARIANTS];
+} BalatroCompactVariants;
+
+typedef struct BalatroCompactHandCard {
+    uint16_t variant;
+    uint8_t flags;
+} BalatroCompactHandCard;
+
+typedef struct BalatroCompactHand {
+    uint16_t count;
+    BalatroCompactHandCard values[BALATRO_OBS_MAX_HAND];
+} BalatroCompactHand;
+
+typedef struct BalatroCompactCard {
+    uint16_t center_id;
+    uint8_t rank;
+    uint8_t suit;
+    uint8_t enhancement;
+    uint8_t edition;
+    uint8_t seal;
+    uint8_t flags;
+    int16_t numeric_q8_8[7];
+} BalatroCompactCard;
+
+#define BALATRO_DEFINE_COMPACT_CARD_ZONE(name, capacity) \
+    typedef struct name { uint16_t count; BalatroCompactCard values[capacity]; } name
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactJokers, BALATRO_OBS_MAX_JOKERS);
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactConsumables, BALATRO_OBS_MAX_CONSUMABLES);
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactShopMain, BALATRO_OBS_MAX_SHOP_MAIN);
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactShopVouchers, BALATRO_OBS_MAX_SHOP_VOUCHERS);
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactShopBoosters, BALATRO_OBS_MAX_SHOP_BOOSTERS);
+BALATRO_DEFINE_COMPACT_CARD_ZONE(BalatroCompactPack, BALATRO_OBS_MAX_PACK_CARDS);
+#undef BALATRO_DEFINE_COMPACT_CARD_ZONE
+
+typedef struct BalatroCompactDeckSummary {
+    uint16_t rank[13];
+    uint16_t suit[4];
+    uint16_t rank_suit[4][13];
+    uint16_t enhancement[9];
+    uint16_t edition[5];
+    uint16_t seal[5];
+    uint16_t derived[14];
+} BalatroCompactDeckSummary;
+
+typedef struct BalatroCompactTags {
+    uint16_t count;
+    uint8_t tag_id[BALATRO_OBS_MAX_TAGS];
+    uint8_t orbital_hand[BALATRO_OBS_MAX_TAGS];
+    uint8_t flags[BALATRO_OBS_MAX_TAGS];
+} BalatroCompactTags;
+
+typedef struct BalatroCompactPokerHand {
+    uint8_t visible;
+    uint32_t level;
+    int16_t chips_q8_8;
+    int16_t mult_q8_8;
+    uint32_t total_plays;
+    uint32_t round_plays;
+} BalatroCompactPokerHand;
+
+typedef struct BalatroCompactObservation {
+    uint16_t version;
+    BalatroCompactGlobals globals;
+    BalatroCompactVariants variants;
+    BalatroCompactHand hand;
+    BalatroCompactDeckSummary owned_deck;
+    BalatroCompactDeckSummary draw_pile;
+    BalatroCompactJokers jokers;
+    BalatroCompactConsumables consumables;
+    BalatroCompactShopMain shop;
+    BalatroCompactShopVouchers shop_vouchers;
+    BalatroCompactShopBoosters shop_boosters;
+    BalatroCompactPack pack;
+    BalatroCompactTags tags;
+    BalatroCompactPokerHand poker_hands[BALATRO_HAND_COUNT];
+} BalatroCompactObservation;
+#pragma pack(pop)
 
 typedef struct BalatroPolicyAction {
     uint8_t type;
@@ -621,6 +751,8 @@ typedef struct BalatroScoreResult {
 
 size_t balatro_state_size(void);
 size_t balatro_observation_size(void);
+size_t balatro_compact_observation_size(void);
+size_t balatro_legal_masks_size(void);
 void balatro_default_config(BalatroConfig *config);
 void balatro_default_observation_profile(BalatroObservationProfile *profile);
 int balatro_init(BalatroState *state, const BalatroConfig *config, uint64_t seed);
@@ -632,9 +764,19 @@ int balatro_step(BalatroState *state, const BalatroAction *action, BalatroStepRe
 /* Fast planner paths. Actions must be decoded from this state's legal view. */
 int balatro_step_trusted(BalatroState *state, const BalatroAction *action, BalatroStepResult *out);
 int balatro_score_play_actions_trusted(const BalatroState *state, const BalatroAction *actions, size_t count, double *scores);
+/* Score-only planner path. It runs scoring-time effects on an isolated state
+   but deliberately skips draw, cash-out, and other post-hand transitions. */
+int balatro_score_plays(const BalatroState *state, const BalatroAction *plays, size_t count, double *scores);
 int balatro_observe(const BalatroState *state, BalatroObservation *out);
+int balatro_observe_rl(const BalatroState *state, BalatroCompactObservation *out, BalatroLegalMasks *legal);
+/* Compatibility helper: emits the packed observation, builds matching masks,
+   then expands those masks into the optional group view. */
+int balatro_observe_compact_legal_view(const BalatroState *state, BalatroCompactObservation *out,
+                                       BalatroLegalView *legal_view);
 int balatro_observe_batch(const BalatroState *states, size_t count, BalatroObservation *observations, int8_t *status);
+int balatro_action_to_observation(const BalatroState *state, const BalatroAction *action, BalatroPolicyAction *out);
 int balatro_action_from_observation(const BalatroState *state, const BalatroPolicyAction *policy, BalatroAction *out);
+int balatro_step_policy(BalatroState *state, const BalatroPolicyAction *action, BalatroStepResult *result);
 int balatro_step_observe(BalatroState *state, const BalatroPolicyAction *action, BalatroStepResult *result, BalatroObservation *observation);
 /* Skips redundant legality validation when the action was decoded from the
    immediately preceding observation's legal masks. */
@@ -644,6 +786,15 @@ int balatro_step_observe_batch(BalatroState *states, const BalatroPolicyAction *
                                BalatroObservation *observations, int8_t *status);
 int balatro_step_observe_batch_trusted(BalatroState *states, const BalatroPolicyAction *actions, size_t count, BalatroStepResult *results,
                                        BalatroObservation *observations, int8_t *status);
+int balatro_step_observe_rl(BalatroState *state, const BalatroPolicyAction *action, BalatroStepResult *result,
+                            BalatroCompactObservation *observation, BalatroLegalMasks *legal);
+int balatro_step_observe_rl_trusted(BalatroState *state, const BalatroPolicyAction *action, BalatroStepResult *result,
+                                    BalatroCompactObservation *observation, BalatroLegalMasks *legal);
+int balatro_step_observe_rl_batch(BalatroState *states, const BalatroPolicyAction *actions, size_t count,
+                                  BalatroStepResult *results, BalatroCompactObservation *observations,
+                                  BalatroLegalMasks *legal, int8_t *status, int trusted);
+int balatro_legal_masks(const BalatroState *state, BalatroLegalMasks *out);
+int balatro_legal_expand(const BalatroLegalMasks *masks, BalatroLegalView *out);
 int balatro_legal_view(const BalatroState *state, BalatroLegalView *out);
 uint32_t balatro_legal_group_count(const BalatroLegalGroup *group);
 int balatro_legal_group_action(const BalatroLegalGroup *group, uint32_t ordinal, BalatroAction *out);

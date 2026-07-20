@@ -48,8 +48,12 @@ static int center_used_for_pool(const BalatroState *state, uint16_t id) {
     /* Card:set_ability updates G.GAME.used_jokers as soon as a Card object is
        constructed.  Therefore unsold shop inventory and the cards already
        constructed for an open pack suppress duplicates too. */
-    for (uint8_t i = 0; i < state->shop_count; ++i)
-        if (state->shop_cards[i].center_id == id) return 1;
+    for (uint8_t i = 0; i < state->shop_main_count; ++i)
+        if (state->shop_main[i].center_id == id) return 1;
+    for (uint8_t i = 0; i < state->shop_voucher_count; ++i)
+        if (state->shop_vouchers[i].center_id == id) return 1;
+    for (uint8_t i = 0; i < state->shop_booster_count; ++i)
+        if (state->shop_boosters[i].center_id == id) return 1;
     for (uint8_t i = 0; i < state->pack_count; ++i)
         if (state->pack_cards[i].center_id == id) return 1;
     return 0;
@@ -240,7 +244,12 @@ static void reprice_all_cards(BalatroState *state) {
        cards already visible in this shop. */
     for (uint8_t i = 0; i < state->joker_count; ++i) reprice_card_after_discount(state, &state->jokers[i], 0);
     for (uint8_t i = 0; i < state->consumable_count; ++i) reprice_card_after_discount(state, &state->consumables[i], 0);
-    for (uint8_t i = 0; i < state->shop_count; ++i) reprice_card_after_discount(state, &state->shop_cards[i], 1);
+    for (uint8_t i = 0; i < state->shop_main_count; ++i)
+        reprice_card_after_discount(state, &state->shop_main[i], 1);
+    for (uint8_t i = 0; i < state->shop_voucher_count; ++i)
+        reprice_card_after_discount(state, &state->shop_vouchers[i], 1);
+    for (uint8_t i = 0; i < state->shop_booster_count; ++i)
+        reprice_card_after_discount(state, &state->shop_boosters[i], 1);
     for (uint8_t i = 0; i < state->pack_count; ++i) reprice_card_after_discount(state, &state->pack_cards[i], 0);
 }
 
@@ -418,7 +427,9 @@ static uint16_t pick_booster(BalatroState *state, int first) {
 }
 
 void balatro_populate_shop(BalatroState *state) {
-    state->shop_count = 0;
+    state->shop_main_count = 0;
+    state->shop_voucher_count = 0;
+    state->shop_booster_count = 0;
     state->tag_d_six_active = 0;
     if (state->tag_d_six_pending) {
         /* D6 Tag fires at shop_start: the first reroll costs $0, then
@@ -435,29 +446,30 @@ void balatro_populate_shop(BalatroState *state) {
     state->tag_coupon_pending = 0;
     for (uint8_t i = 0; i < state->shop_joker_max; ++i) {
         BalatroCard card = create_shop_card(state);
-        state->shop_cards[state->shop_count++] = card;
+        if (state->shop_main_count < BALATRO_OBS_MAX_SHOP_MAIN)
+            state->shop_main[state->shop_main_count++] = card;
     }
     /* current_round.voucher persists across shops until it is redeemed or a
        Boss is defeated.  Do not draw a replacement merely for opening the next shop. */
-    if (state->next_voucher_id) state->shop_cards[state->shop_count++] = center_card(state, state->next_voucher_id);
-    while (state->tag_voucher_pending && state->shop_count + 2 < BALATRO_MAX_SHOP_CARDS) {
+    if (state->next_voucher_id && state->shop_voucher_count < BALATRO_OBS_MAX_SHOP_VOUCHERS)
+        state->shop_vouchers[state->shop_voucher_count++] = center_card(state, state->next_voucher_id);
+    while (state->tag_voucher_pending && state->shop_voucher_count < BALATRO_OBS_MAX_SHOP_VOUCHERS) {
         BalatroCard free_voucher = center_card(state, balatro_pick_voucher_from_tag(state));
         free_voucher.cost = 0;
         free_voucher.sell_cost = 0;
-        state->shop_cards[state->shop_count++] = free_voucher;
+        state->shop_vouchers[state->shop_voucher_count++] = free_voucher;
         state->tag_voucher_pending--;
     }
-    state->shop_cards[state->shop_count++] = center_card(state, pick_booster(state, !state->first_shop_buffoon));
+    state->shop_boosters[state->shop_booster_count++] = center_card(state, pick_booster(state, !state->first_shop_buffoon));
     state->first_shop_buffoon = 1;
-    state->shop_cards[state->shop_count++] = center_card(state, pick_booster(state, 0));
+    state->shop_boosters[state->shop_booster_count++] = center_card(state, pick_booster(state, 0));
     /* Coupon Tag's shop_final_pass visits every card in G.shop_jokers
        (Jokers, consumables, and shop playing cards) and G.shop_booster.
        The separate voucher area is the only inventory it leaves priced. */
-    if (coupon)
-        for (uint8_t i = 0; i < state->shop_count; ++i) {
-            uint8_t set = balatro_card_set(&state->shop_cards[i]);
-            if (set != SET_VOUCHER) state->shop_cards[i].cost = 0;
-        }
+    if (coupon) {
+        for (uint8_t i = 0; i < state->shop_main_count; ++i) state->shop_main[i].cost = 0;
+        for (uint8_t i = 0; i < state->shop_booster_count; ++i) state->shop_boosters[i].cost = 0;
+    }
 }
 
 int balatro_can_afford(const BalatroState *state, int32_t cost) {
@@ -469,8 +481,8 @@ int balatro_can_afford(const BalatroState *state, int32_t cost) {
 }
 
 int balatro_buy_shop_card(BalatroState *state, uint8_t index) {
-    if (!state || index >= state->shop_count) return BALATRO_ERR_ACTION;
-    BalatroCard card = state->shop_cards[index];
+    if (!state || index >= state->shop_main_count) return BALATRO_ERR_ACTION;
+    BalatroCard card = state->shop_main[index];
     uint8_t set = balatro_card_set(&card);
     if (!balatro_can_afford(state, card.cost)) return BALATRO_ERR_ACTION;
     if (set == SET_JOKER && (state->joker_count >= BALATRO_MAX_JOKERS || (state->joker_count >= state->joker_slots && card.edition != 4)))
@@ -478,7 +490,8 @@ int balatro_buy_shop_card(BalatroState *state, uint8_t index) {
     if ((set == SET_TAROT || set == SET_PLANET || set == SET_SPECTRAL) &&
         (state->consumable_count >= BALATRO_MAX_CONSUMABLES || (state->consumable_count >= state->consumable_slots && card.edition != 4)))
         return BALATRO_ERR_CAPACITY;
-    if ((set == SET_DEFAULT || set == SET_ENHANCED) && state->deck_count >= BALATRO_MAX_DECK) return BALATRO_ERR_CAPACITY;
+    if ((set == SET_DEFAULT || set == SET_ENHANCED) &&
+        (state->deck_count >= BALATRO_MAX_DECK || !balatro_can_add_playing_cards(state, 1))) return BALATRO_ERR_CAPACITY;
     state->dollars -= card.cost;
     if (set == SET_JOKER) {
         state->jokers[state->joker_count++] = card;
@@ -495,8 +508,9 @@ int balatro_buy_shop_card(BalatroState *state, uint8_t index) {
         balatro_playing_card_added(state, 1);
     } else
         return BALATRO_ERR_ACTION;
-    memmove(&state->shop_cards[index], &state->shop_cards[index + 1], (state->shop_count - index - 1) * sizeof(BalatroCard));
-    state->shop_count--;
+    memmove(&state->shop_main[index], &state->shop_main[index + 1],
+            (state->shop_main_count - index - 1) * sizeof(BalatroCard));
+    state->shop_main_count--;
     return BALATRO_OK;
 }
 
@@ -544,6 +558,7 @@ int balatro_sell_joker(BalatroState *state, uint8_t index) {
             state->jokers[j].state[0] = (state->jokers[j].state[0] > 100 ? state->jokers[j].state[0] : 100) + 25;
     memmove(&state->jokers[index], &state->jokers[index + 1], (state->joker_count - index - 1) * sizeof(BalatroCard));
     state->joker_count--;
+    balatro_refresh_joker_cache(state);
     return BALATRO_OK;
 }
 
@@ -558,19 +573,12 @@ int balatro_reroll_shop(BalatroState *state) {
        per-round cost after a free reroll. */
     if (!free) state->reroll_increase++;
     state->reroll_cost = state->free_rerolls ? 0 : (state->tag_d_six_active ? 0 : state->reroll_base) + state->reroll_increase;
-    BalatroCard fixed[BALATRO_MAX_SHOP_CARDS];
-    uint8_t fixed_count = 0;
-    for (uint8_t i = 0; i < state->shop_count; ++i) {
-        uint8_t set = balatro_card_set(&state->shop_cards[i]);
-        if (set == SET_VOUCHER || set == SET_BOOSTER) fixed[fixed_count++] = state->shop_cards[i];
-    }
-    state->shop_count = 0;
+    state->shop_main_count = 0;
     for (uint8_t i = 0; i < state->shop_joker_max; ++i) {
         BalatroCard card = create_shop_card(state);
-        state->shop_cards[state->shop_count++] = card;
+        if (state->shop_main_count < BALATRO_OBS_MAX_SHOP_MAIN)
+            state->shop_main[state->shop_main_count++] = card;
     }
-    memcpy(&state->shop_cards[state->shop_count], fixed, fixed_count * sizeof(BalatroCard));
-    state->shop_count += fixed_count;
     return BALATRO_OK;
 }
 
@@ -583,15 +591,10 @@ static void apply_voucher(BalatroState *state, uint16_t id) {
         /* change_shop_size(1) immediately fills every empty G.shop_jokers
            slot.  This can create more than one card when an earlier shop
            purchase left a hole before Overstock was redeemed. */
-        uint8_t shop_joker_count = 0;
-        for (uint8_t i = 0; i < state->shop_count; ++i) {
-            uint8_t set = balatro_card_set(&state->shop_cards[i]);
-            if (set != SET_VOUCHER && set != SET_BOOSTER) shop_joker_count++;
-        }
-        while (shop_joker_count < state->shop_joker_max && state->shop_count < BALATRO_MAX_SHOP_CARDS) {
+        while (state->shop_main_count < state->shop_joker_max &&
+               state->shop_main_count < BALATRO_OBS_MAX_SHOP_MAIN) {
             BalatroCard card = create_shop_card(state);
-            state->shop_cards[state->shop_count++] = card;
-            shop_joker_count++;
+            state->shop_main[state->shop_main_count++] = card;
         }
         break;
     }
@@ -649,14 +652,15 @@ static void apply_voucher(BalatroState *state, uint16_t id) {
 }
 
 int balatro_redeem_voucher(BalatroState *state, uint8_t index) {
-    if (!state || index >= state->shop_count) return BALATRO_ERR_ACTION;
-    BalatroCard card = state->shop_cards[index];
-    if (balatro_card_set(&card) != SET_VOUCHER || !balatro_can_afford(state, card.cost)) return BALATRO_ERR_ACTION;
+    if (!state || index >= state->shop_voucher_count) return BALATRO_ERR_ACTION;
+    BalatroCard card = state->shop_vouchers[index];
+    if (!balatro_can_afford(state, card.cost)) return BALATRO_ERR_ACTION;
     state->dollars -= card.cost;
     if (state->next_voucher_id == card.center_id) state->next_voucher_id = 0;
     balatro_mark_center_used(state, card.center_id);
     apply_voucher(state, card.center_id);
-    memmove(&state->shop_cards[index], &state->shop_cards[index + 1], (state->shop_count - index - 1) * sizeof(BalatroCard));
-    state->shop_count--;
+    memmove(&state->shop_vouchers[index], &state->shop_vouchers[index + 1],
+            (state->shop_voucher_count - index - 1) * sizeof(BalatroCard));
+    state->shop_voucher_count--;
     return BALATRO_OK;
 }

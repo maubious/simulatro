@@ -68,14 +68,6 @@ def clone(state: State) -> State:
     return State.from_buffer_copy(bytes(state))
 
 
-def _shop_area(center_id: int) -> str:
-    if 268 <= center_id <= 299:
-        return "voucher"
-    if 233 <= center_id <= 264:
-        return "pack"
-    return "card"
-
-
 def action_record(state: State, action: Action) -> dict[str, Any]:
     """Convert a native action to BalatroBot's area-local action indices."""
     record: dict[str, Any] = {
@@ -83,12 +75,6 @@ def action_record(state: State, action: Action) -> dict[str, Any]:
         "primary": int(action.primary),
         "selection": [int(action.selection[i]) for i in range(action.selection_count)],
     }
-    if action.type in (BUY, VOUCHER, OPEN):
-        wanted = {BUY: "card", VOUCHER: "voucher", OPEN: "pack"}[int(action.type)]
-        record["primary"] = sum(
-            _shop_area(int(state.shop_cards[i].center_id)) == wanted
-            for i in range(int(action.primary))
-        )
     if action.type in (MOVE_JOKER_LEFT, MOVE_JOKER_RIGHT, 17, 18):
         count = int(state.joker_count if action.type in (MOVE_JOKER_LEFT, MOVE_JOKER_RIGHT) else state.hand_count)
         order = list(range(count))
@@ -118,7 +104,7 @@ def _native_trace_state(state: State) -> dict[str, Any]:
             "hand": int(state.hand_count),
             "jokers": int(state.joker_count),
             "consumables": int(state.consumable_count),
-            "shop": int(state.shop_count),
+            "shop": int(state.shop_main_count + state.shop_voucher_count + state.shop_booster_count),
             "pack": int(state.pack_count),
             "actions": int(state.actions_taken),
             "terminal": bool(state.terminal),
@@ -156,8 +142,12 @@ def _write_trace(path: Path, trace: dict[str, Any]) -> None:
 
 
 def _center_for_action(state: State, action: Action) -> int:
-    if action.type in (BUY, BUY_AND_USE, OPEN, VOUCHER):
-        return int(state.shop_cards[action.primary].center_id)
+    if action.type in (BUY, BUY_AND_USE):
+        return int(state.shop_main[action.primary].center_id)
+    if action.type == VOUCHER:
+        return int(state.shop_vouchers[action.primary].center_id)
+    if action.type == OPEN:
+        return int(state.shop_boosters[action.primary].center_id)
     if action.type == PICK:
         return int(state.pack_cards[action.primary].center_id)
     if action.type == USE:
@@ -324,7 +314,7 @@ def _best_joker_purchase(core: BalatroCore, state: State, legal: list[Action]) -
         return None, (-math.inf, -math.inf, -math.inf)
     action = max(
         purchases,
-        key=lambda a: (_trial_value(core, state, a), -int(state.shop_cards[a.primary].cost)),
+        key=lambda a: (_trial_value(core, state, a), -int(state.shop_main[a.primary].cost)),
     )
     return action, _trial_value(core, state, action)
 
@@ -363,7 +353,7 @@ def _shop_action(core: BalatroCore, state: State, legal: list[Action]) -> Action
     if joker is not None:
         # Fill empty slots aggressively. Once a build exists, preserve the
         # interest floor unless the purchase materially improves next round.
-        price = int(state.shop_cards[joker.primary].cost)
+        price = int(state.shop_main[joker.primary].cost)
         improves = joker_value > baseline and joker_value[2] > baseline[2] + 0.05
         if state.joker_count < min(3, state.joker_slots) or improves or state.dollars - price >= 25:
             return joker
@@ -385,7 +375,7 @@ def _shop_action(core: BalatroCore, state: State, legal: list[Action]) -> Action
     if vouchers:
         best = max(vouchers, key=lambda a: (_trial_value(core, state, a), _center_for_action(state, a) in HIGH_VALUE_VOUCHERS))
         center = _center_for_action(state, best)
-        price = int(state.shop_cards[best.primary].cost)
+        price = int(state.shop_vouchers[best.primary].cost)
         if center in HIGH_VALUE_VOUCHERS and (state.dollars - price >= 10 or center in {274, 281, 286, 287, 299}):
             return best
 
@@ -395,10 +385,10 @@ def _shop_action(core: BalatroCore, state: State, legal: list[Action]) -> Action
     if packs:
         buffoon = [a for a in packs if 241 <= _center_for_action(state, a) <= 244]
         if buffoon and state.joker_count < min(3, state.joker_slots) and state.dollars >= 15:
-            return min(buffoon, key=lambda a: int(state.shop_cards[a.primary].cost))
+            return min(buffoon, key=lambda a: int(state.shop_boosters[a.primary].cost))
         celestial = [a for a in packs if 245 <= _center_for_action(state, a) <= 252]
         if celestial and state.dollars >= 22 and baseline[1] < 1.5:
-            return min(celestial, key=lambda a: int(state.shop_cards[a.primary].cost))
+            return min(celestial, key=lambda a: int(state.shop_boosters[a.primary].cost))
 
     # Reroll only while the build cannot conservatively cover the next blind.
     reroll = next((a for a in legal if a.type == REROLL), None)

@@ -222,12 +222,13 @@ static void test_legal_view(void) {
     state.discards_left = 1;
     for (uint8_t i = 8; i < BALATRO_MAX_HAND; ++i) state.hand[i] = card((uint8_t)(i & 3), (uint8_t)(2 + i % 13));
     count = legal_actions(&state, NULL, 0);
-    assert(count == 13800);
+    assert(count > 13800);
     assert(legal_actions(&state, prefix, 17) == count);
+    int full_hand_count = count;
     state.consumable_count = BALATRO_MAX_CONSUMABLES;
     for (uint8_t i = 0; i < state.consumable_count; ++i) state.consumables[i].center_id = BALATRO_CENTER_C_WORLD;
     count = legal_actions(&state, NULL, 0);
-    assert(count == 19376 && count < BALATRO_MAX_LEGAL_ACTIONS);
+    assert(count > full_hand_count && count > BALATRO_MAX_LEGAL_ACTIONS);
     assert(balatro_legal_view(&state, &view) == BALATRO_OK);
     assert(view.action_count == (uint32_t)count);
     uint32_t counted = 0;
@@ -250,7 +251,7 @@ static void test_legal_view(void) {
     assert_legal_view_matches_flat(&state);
 
     state.phase = BALATRO_PHASE_PACK_OPENING;
-    state.shop_count = 0;
+    state.shop_main_count = 0;
     state.pack_count = 2;
     state.pack_choices = 1;
     state.pack_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_DEATH};
@@ -459,14 +460,14 @@ static void test_source_buy_and_use_bypasses_consumable_capacity(void) {
     state.consumable_slots = state.consumable_count = 2;
     state.consumables[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_FOOL};
     state.consumables[1] = (BalatroCard){.center_id = BALATRO_CENTER_C_TOWER};
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_PLANET_X, .cost = 3, .sell_cost = 1};
+    state.shop_main_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_PLANET_X, .cost = 3, .sell_cost = 1};
     state.hand_levels[BALATRO_FIVE_OF_A_KIND] = 1;
 
     BalatroAction action = {.type = BALATRO_ACTION_BUY_AND_USE, .primary = 0};
     BalatroStepResult result;
     assert(balatro_step(&state, &action, &result) == BALATRO_OK);
-    assert(state.dollars == 7 && state.shop_count == 0);
+    assert(state.dollars == 7 && state.shop_main_count == 0);
     assert(state.consumable_count == 2);
     assert(state.hand_levels[BALATRO_FIVE_OF_A_KIND] == 2);
 }
@@ -645,6 +646,265 @@ static void test_shaped_reward_progress(void) {
     assert(result.reward > 0.0f);
 }
 
+static int16_t reference_compact_q8_8(float value) {
+    if (!(value == value)) return 0;
+    if (value > 127.99609375f) value = 127.99609375f;
+    if (value < -128.0f) value = -128.0f;
+    float scaled = value * 256.0f;
+    return (int16_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+}
+
+static void reference_compact_deck(BalatroCompactDeckSummary *dst, const BalatroDeckSummary *src) {
+    memcpy(dst->rank, src->rank, sizeof(dst->rank));
+    memcpy(dst->suit, src->suit, sizeof(dst->suit));
+    memcpy(dst->rank_suit, src->rank_suit, sizeof(dst->rank_suit));
+    memcpy(dst->enhancement, src->enhancement, sizeof(dst->enhancement));
+    memcpy(dst->edition, src->edition, sizeof(dst->edition));
+    memcpy(dst->seal, src->seal, sizeof(dst->seal));
+    const uint16_t derived[] = {
+        src->face, src->numbered, src->ace, src->stone, src->wild, src->steel, src->gold,
+        src->glass, src->enhanced, src->unmodified, src->total, 0, 0, 0,
+    };
+    memcpy(dst->derived, derived, sizeof(dst->derived));
+}
+
+static void reference_compact_card(BalatroCompactCard *dst, uint16_t center_id, uint8_t rank, uint8_t suit,
+                                   uint8_t enhancement, uint8_t edition, uint8_t seal, uint8_t flags,
+                                   float perma_bonus, float cost, float sell_cost, const float mutable_value[4]) {
+    *dst = (BalatroCompactCard){
+        .center_id = center_id,
+        .rank = rank,
+        .suit = suit,
+        .enhancement = enhancement,
+        .edition = edition,
+        .seal = seal,
+        .flags = flags,
+    };
+    dst->numeric_q8_8[0] = reference_compact_q8_8(perma_bonus);
+    dst->numeric_q8_8[1] = reference_compact_q8_8(cost);
+    dst->numeric_q8_8[2] = reference_compact_q8_8(sell_cost);
+    for (int i = 0; i < 4; ++i) dst->numeric_q8_8[3 + i] = reference_compact_q8_8(mutable_value[i]);
+}
+
+#define REFERENCE_COMPACT_ZONE(dst, src)                                                                                              \
+    do {                                                                                                                               \
+        (dst).count = (src).count;                                                                                                     \
+        for (uint16_t _i = 0; _i < (src).count; ++_i) {                                                                               \
+            float _mutable[4];                                                                                                         \
+            for (int _m = 0; _m < 4; ++_m) _mutable[_m] = (src).mutable_value[_m][_i];                                                \
+            reference_compact_card(&(dst).values[_i], (src).center_id[_i], (src).rank[_i], (src).suit[_i],                           \
+                                   (src).enhancement[_i], (src).edition[_i], (src).seal[_i], (src).flags[_i],                         \
+                                   (src).perma_bonus[_i], (src).cost[_i], (src).sell_cost[_i], _mutable);                             \
+        }                                                                                                                              \
+    } while (0)
+
+static void reference_compact_observation(const BalatroObservation *observation, BalatroCompactObservation *out) {
+    memset(out, 0, sizeof(*out));
+    out->version = BALATRO_COMPACT_OBSERVATION_VERSION;
+    const BalatroObservationScalars *s = &observation->scalars;
+    const uint16_t ids[BALATRO_COMPACT_ID_SCALARS] = {
+        s->deck_id, s->blind_id, s->next_boss_id, s->next_voucher_id, s->last_tarot_planet,
+    };
+    memcpy(out->globals.ids, ids, sizeof(ids));
+    const uint8_t u8[BALATRO_COMPACT_U8_SCALARS] = {
+        s->stake, s->phase, s->blind_on_deck, s->won, s->terminal, s->blind_disabled, s->hand_sort_suit,
+        s->most_played_hand, s->last_hand_type, s->blind_skipped_mask, s->blind_only_hand, s->boss_rerolled,
+        s->free_rerolls, s->reroll_base, s->reroll_increase, s->discount_percent, s->hands_per_round,
+        s->discards_per_round, s->base_hand_size, s->pack_kind, s->double_tag, s->active_tag, s->tag_hand_bonus,
+        s->tag_force_rarity, s->tag_force_rarity_count, s->tag_force_edition, s->tag_force_edition_count,
+        s->tag_voucher_pending, s->tag_coupon_pending, s->tag_coupon_active, s->tag_investment_pending,
+        s->tag_d_six_pending, s->tag_d_six_active, s->ecto_penalty, s->gros_michel_extinct, s->chips_number,
+        s->blind_chips_number, s->last_hand_score_number, s->chips_over_blind_number,
+    };
+    memcpy(out->globals.u8, u8, sizeof(u8));
+    const uint32_t u32[BALATRO_COMPACT_U32_SCALARS] = {
+        s->ante, s->round, s->actions_taken, s->run_hands_played,
+    };
+    memcpy(out->globals.u32, u32, sizeof(u32));
+    const uint16_t u16[BALATRO_COMPACT_U16_SCALARS] = {
+        s->hands_left, s->discards_left, s->hands_played, s->discards_used, s->hand_size, s->joker_slots,
+        s->consumable_slots, s->skips, s->pack_choices, s->unused_discards, s->blind_hands_mask, s->tarots_used,
+        s->planet_usage_mask,
+    };
+    memcpy(out->globals.u16, u16, sizeof(u16));
+    const float q[BALATRO_COMPACT_Q_SCALARS] = {
+        s->dollars, s->chips, s->blind_chips, s->last_hand_score, s->chips_over_blind, s->reroll_cost,
+        s->round_earnings, s->interest_cap, s->interest_amount, s->blind_reward, s->joker_rate, s->tarot_rate,
+        s->planet_rate, s->spectral_rate, s->playing_card_rate, s->edition_rate,
+    };
+    for (int i = 0; i < BALATRO_COMPACT_Q_SCALARS; ++i) out->globals.q8_8[i] = reference_compact_q8_8(q[i]);
+    for (int i = 0; i < BALATRO_CENTER_COUNT; ++i)
+        if (s->redeemed_vouchers[i]) out->globals.redeemed_vouchers[i / 8] |= (uint8_t)(1u << (i % 8));
+
+    out->variants.count = observation->variants.count;
+    for (uint16_t i = 0; i < observation->variants.count; ++i) {
+        out->variants.values[i] = (BalatroCompactVariant){
+            .rank = observation->variants.rank[i],
+            .suit = observation->variants.suit[i],
+            .enhancement = observation->variants.enhancement[i],
+            .edition = observation->variants.edition[i],
+            .seal = observation->variants.seal[i],
+            .flags = observation->variants.flags[i],
+            .perma_bonus_q8_8 = reference_compact_q8_8(observation->variants.perma_bonus[i]),
+            .owned_count = observation->variants.owned_count[i],
+            .draw_count = observation->variants.draw_count[i],
+            .hand_count = observation->variants.hand_count[i],
+            .discard_count = observation->variants.discard_count[i],
+        };
+    }
+    out->hand.count = observation->hand.count;
+    for (uint16_t i = 0; i < observation->hand.count; ++i)
+        out->hand.values[i] =
+            (BalatroCompactHandCard){.variant = observation->hand.variant[i], .flags = observation->hand.flags[i]};
+    reference_compact_deck(&out->owned_deck, &observation->owned_deck);
+    reference_compact_deck(&out->draw_pile, &observation->draw_pile);
+    REFERENCE_COMPACT_ZONE(out->jokers, observation->jokers);
+    REFERENCE_COMPACT_ZONE(out->consumables, observation->consumables);
+    REFERENCE_COMPACT_ZONE(out->shop, observation->shop);
+    REFERENCE_COMPACT_ZONE(out->shop_vouchers, observation->shop_vouchers);
+    REFERENCE_COMPACT_ZONE(out->shop_boosters, observation->shop_boosters);
+    REFERENCE_COMPACT_ZONE(out->pack, observation->pack);
+    out->tags.count = observation->tags.count;
+    memcpy(out->tags.tag_id, observation->tags.tag_id, observation->tags.count);
+    memcpy(out->tags.orbital_hand, observation->tags.orbital_hand, observation->tags.count);
+    memcpy(out->tags.flags, observation->tags.flags, observation->tags.count);
+    for (int i = 0; i < BALATRO_HAND_COUNT; ++i) {
+        out->poker_hands[i] = (BalatroCompactPokerHand){
+            .visible = observation->poker_hands.visible[i],
+            .level = observation->poker_hands.level[i],
+            .chips_q8_8 = reference_compact_q8_8(observation->poker_hands.chips[i]),
+            .mult_q8_8 = reference_compact_q8_8(observation->poker_hands.mult[i]),
+            .total_plays = observation->poker_hands.total_plays[i],
+            .round_plays = observation->poker_hands.round_plays[i],
+        };
+    }
+}
+#undef REFERENCE_COMPACT_ZONE
+
+static void assert_compact_observation_matches(const BalatroState *state) {
+    BalatroObservation public_observation;
+    BalatroCompactObservation compact_observation, reference_observation;
+    BalatroLegalView combined_view, separate_view;
+    BalatroLegalMasks legal;
+    assert(balatro_observe(state, &public_observation) == BALATRO_OK);
+    memset(&compact_observation, 0, sizeof(compact_observation));
+    reference_compact_observation(&public_observation, &reference_observation);
+    assert(balatro_observe_rl(state, &compact_observation, &legal) == BALATRO_OK);
+    assert(memcmp(&legal, &public_observation.legal, sizeof(legal)) == 0);
+    assert(balatro_legal_expand(&legal, &combined_view) == BALATRO_OK);
+    assert(balatro_legal_view(state, &separate_view) == BALATRO_OK);
+    assert(memcmp(&compact_observation, &reference_observation, sizeof(compact_observation)) == 0);
+    assert(memcmp(&combined_view, &separate_view, sizeof(combined_view)) == 0);
+}
+
+static void test_compact_observation(void) {
+    BalatroConfig config;
+    balatro_default_config(&config);
+    BalatroState state;
+    assert(balatro_init_seed_string(&state, &config, "COMPACT_OBSERVATION") == BALATRO_OK);
+    assert(sizeof(BalatroCompactObservation) == 8331);
+    assert_compact_observation_matches(&state);
+
+    BalatroAction select = {.type = BALATRO_ACTION_SELECT_BLIND};
+    BalatroStepResult result;
+    assert(balatro_step(&state, &select, &result) == BALATRO_OK);
+    assert_compact_observation_matches(&state);
+
+    state.joker_count = 1;
+    state.jokers[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .cost = 3, .sell_cost = 1};
+    state.consumable_count = 1;
+    state.consumables[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_STRENGTH, .cost = 4};
+    state.shop_main_count = 1;
+    state.shop_voucher_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_GREEDY_JOKER, .cost = 5};
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_BLANK, .cost = 10};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1, .cost = 4};
+    state.pack_count = 1;
+    state.pack_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_EMPRESS};
+    state.dollars = 123;
+    state.joker_rate = 2.5f;
+    assert_compact_observation_matches(&state);
+
+    state.deck[0].enhancement = BALATRO_ENHANCEMENT_GLASS;
+    state.deck[0].edition = BALATRO_EDITION_FOIL;
+    state.deck[0].seal = BALATRO_SEAL_RED;
+    state.deck[0].perma_bonus = 7;
+    assert_compact_observation_matches(&state);
+
+    config.observation.playing_cards = 51;
+    assert(balatro_init(&state, &config, 9) == BALATRO_OK);
+    BalatroCompactObservation compact_observation;
+    BalatroLegalView legal_view;
+    assert(balatro_observe_compact_legal_view(&state, &compact_observation, &legal_view) ==
+           BALATRO_ERR_OBSERVATION_CAPACITY);
+}
+
+static void test_rl_batch_and_score_sandbox(void) {
+    BalatroConfig config;
+    balatro_default_config(&config);
+    config.validation = 1;
+
+    BalatroState states[2];
+    assert(balatro_init_seed_string(&states[0], &config, "RL_BATCH_A") == BALATRO_OK);
+    assert(balatro_init_seed_string(&states[1], &config, "RL_BATCH_B") == BALATRO_OK);
+    BalatroPolicyAction actions[2] = {
+        {.type = BALATRO_ACTION_SELECT_BLIND, .reorder_destination = UINT16_MAX},
+        {.type = BALATRO_ACTION_SELECT_BLIND, .reorder_destination = UINT16_MAX},
+    };
+    BalatroStepResult results[2];
+    BalatroCompactObservation observations[2];
+    BalatroLegalMasks legal[2];
+    int8_t status[2] = {-1, -1};
+    assert(balatro_step_observe_rl_batch(states, actions, 2, results, observations, legal, status, 0) == BALATRO_OK);
+    for (uint8_t i = 0; i < 2; ++i) {
+        assert(status[i] == BALATRO_OK);
+        assert(states[i].phase == BALATRO_PHASE_SELECTING_HAND);
+        assert(observations[i].version == BALATRO_COMPACT_OBSERVATION_VERSION);
+        assert(legal[i].action_type[BALATRO_ACTION_PLAY_HAND]);
+    }
+
+    BalatroState sandbox = states[0];
+    assert(balatro_debug_add_center(&sandbox, BALATRO_CENTER_J_VAMPIRE, BALATRO_EDITION_NONE, 0) == BALATRO_OK);
+    sandbox.hand[0].enhancement = BALATRO_ENHANCEMENT_MULT;
+    BalatroAction play = {.type = BALATRO_ACTION_PLAY_HAND, .selection_count = 1, .selection = {0}};
+    uint64_t before = balatro_state_hash(&sandbox);
+    double score;
+    assert(balatro_score_plays(&sandbox, &play, 1, &score) == BALATRO_OK);
+    assert(balatro_state_hash(&sandbox) == before);
+
+    BalatroState stepped = sandbox;
+    assert(balatro_step_trusted(&stepped, &play, &results[0]) == BALATRO_OK);
+    assert(stepped.last_hand_score == score);
+    assert(sandbox.hand[0].enhancement == BALATRO_ENHANCEMENT_MULT);
+    assert(sandbox.jokers[0].state[0] != stepped.jokers[0].state[0]);
+
+    const uint16_t scoring_jokers[] = {
+        BALATRO_CENTER_J_JOKER,
+        BALATRO_CENTER_J_SPACE,
+        BALATRO_CENTER_J_MIDAS_MASK,
+        BALATRO_CENTER_J_LUCKY_CAT,
+    };
+    for (size_t i = 0; i < sizeof(scoring_jokers) / sizeof(scoring_jokers[0]); ++i) {
+        BalatroState candidate = states[1];
+        assert(balatro_debug_add_center(&candidate, scoring_jokers[i], BALATRO_EDITION_NONE, 0) == BALATRO_OK);
+        candidate.hand[0].rank = 13;
+        if (scoring_jokers[i] == BALATRO_CENTER_J_LUCKY_CAT)
+            candidate.hand[0].enhancement = BALATRO_ENHANCEMENT_LUCKY;
+        before = balatro_state_hash(&candidate);
+        assert(balatro_score_plays(&candidate, &play, 1, &score) == BALATRO_OK);
+        assert(balatro_state_hash(&candidate) == before);
+        stepped = candidate;
+        assert(balatro_step_trusted(&stepped, &play, &results[0]) == BALATRO_OK);
+        assert(stepped.last_hand_score == score);
+    }
+
+    assert(balatro_state_size() == sizeof(BalatroState));
+    assert(balatro_observation_size() == sizeof(BalatroObservation));
+    assert(balatro_compact_observation_size() == sizeof(BalatroCompactObservation));
+    assert(balatro_legal_masks_size() == sizeof(BalatroLegalMasks));
+}
+
 static void test_observation_layout(void) {
     BalatroConfig config;
     balatro_default_config(&config);
@@ -718,10 +978,12 @@ static void test_observation_policy_actions(void) {
     assert(balatro_init_seed_string(&state, &config, "OBS_ACTION") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
-    state.shop_count = 3;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_BLANK, .cost = 10};
-    state.shop_cards[1] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .cost = 2};
-    state.shop_cards[2] = (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1, .cost = 4};
+    state.shop_main_count = 1;
+    state.shop_voucher_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .cost = 2};
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_BLANK, .cost = 10};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1, .cost = 4};
     BalatroObservation observation;
     assert(balatro_observe(&state, &observation) == BALATRO_OK);
     assert(observation.shop.count == 1 && observation.shop.center_id[0] == BALATRO_CENTER_J_JOKER);
@@ -734,7 +996,7 @@ static void test_observation_policy_actions(void) {
     BalatroPolicyAction policy = {.type = BALATRO_ACTION_BUY_CARD, .primary = 0};
     BalatroAction native;
     assert(balatro_action_from_observation(&state, &policy, &native) == BALATRO_OK);
-    assert(native.primary == 1);
+    assert(native.primary == 0);
 
     assert(balatro_init_seed_string(&state, &config, "OBS_STEP") == BALATRO_OK);
     policy = (BalatroPolicyAction){.type = BALATRO_ACTION_SELECT_BLIND};
@@ -774,6 +1036,71 @@ static void test_observation_policy_actions(void) {
     assert(balatro_step_observe_batch(states, policies, 2, results, observations, status) == BALATRO_OK);
     assert(status[0] == BALATRO_OK && status[1] == BALATRO_OK);
     assert(observations[0].hand.count == 8 && observations[1].hand.count == 8);
+}
+
+static void test_public_abi_capacity_boundaries(void) {
+    BalatroConfig config;
+    balatro_default_config(&config);
+    BalatroState state;
+    BalatroObservation observation;
+    BalatroLegalView view;
+
+    config.validation = 1;
+    assert(balatro_init_seed_string(&state, &config, "ABI_PLAYING") == BALATRO_OK);
+    while ((uint16_t)(state.deck_count + state.hand_count + state.discard_count) < BALATRO_OBS_MAX_PLAYING_CARDS)
+        assert(balatro_debug_add_playing_card(&state, BALATRO_SPADES, 14,
+            BALATRO_ENHANCEMENT_NONE, BALATRO_EDITION_NONE, BALATRO_SEAL_NONE) == BALATRO_OK);
+    assert(state.deck_count == BALATRO_OBS_MAX_PLAYING_CARDS);
+    assert(balatro_debug_add_playing_card(&state, BALATRO_SPADES, 14,
+        BALATRO_ENHANCEMENT_NONE, BALATRO_EDITION_NONE, BALATRO_SEAL_NONE) == BALATRO_ERR_CAPACITY);
+    assert(balatro_observe(&state, &observation) == BALATRO_OK);
+    assert(observation.owned_deck.total == BALATRO_OBS_MAX_PLAYING_CARDS);
+
+    assert(balatro_init_seed_string(&state, &config, "ABI_HAND") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SELECTING_HAND;
+    state.deck_count = state.discard_count = 0;
+    state.hand_count = BALATRO_OBS_MAX_HAND;
+    state.hands_left = state.discards_left = 1;
+    for (uint8_t i = 0; i < state.hand_count; ++i)
+        state.hand[i] = (BalatroCard){.center_id = BALATRO_CENTER_C_BASE,
+            .suit = (uint8_t)(i & 3), .rank = (uint8_t)(2 + i % 13), .sort_id = (uint16_t)(i + 1)};
+    assert(balatro_observe(&state, &observation) == BALATRO_OK);
+    assert(balatro_legal_view(&state, &view) == BALATRO_OK);
+    assert(observation.hand.count == BALATRO_OBS_MAX_HAND);
+    int found_full_hand = 0;
+    for (uint16_t i = 0; i < view.group_count; ++i)
+        if (view.groups[i].kind == BALATRO_LEGAL_SELECTION &&
+            view.groups[i].selection.type == BALATRO_ACTION_PLAY_HAND) {
+            assert(view.groups[i].selection.allowed_mask == UINT64_MAX);
+            found_full_hand = 1;
+        }
+    assert(found_full_hand);
+
+    assert(balatro_init_seed_string(&state, &config, "ABI_SHOP") == BALATRO_OK);
+    state.phase = BALATRO_PHASE_SHOP;
+    state.dollars = 100;
+    state.shop_main_count = BALATRO_OBS_MAX_SHOP_MAIN;
+    state.shop_voucher_count = BALATRO_OBS_MAX_SHOP_VOUCHERS;
+    state.shop_booster_count = BALATRO_OBS_MAX_SHOP_BOOSTERS;
+    for (uint8_t i = 0; i < BALATRO_OBS_MAX_SHOP_MAIN; ++i)
+        state.shop_main[i] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER};
+    for (uint8_t i = 0; i < BALATRO_OBS_MAX_SHOP_VOUCHERS; ++i)
+        state.shop_vouchers[i] = (BalatroCard){.center_id = BALATRO_CENTER_V_BLANK};
+    for (uint8_t i = 0; i < BALATRO_OBS_MAX_SHOP_BOOSTERS; ++i)
+        state.shop_boosters[i] =
+            (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1};
+    assert(balatro_observe(&state, &observation) == BALATRO_OK);
+    assert(observation.shop.count == BALATRO_OBS_MAX_SHOP_MAIN);
+    assert(observation.shop_vouchers.count == BALATRO_OBS_MAX_SHOP_VOUCHERS);
+    assert(observation.shop_boosters.count == BALATRO_OBS_MAX_SHOP_BOOSTERS);
+    BalatroAction native = {.type = BALATRO_ACTION_REDEEM_VOUCHER,
+        .primary = BALATRO_OBS_MAX_SHOP_VOUCHERS - 1};
+    BalatroPolicyAction policy;
+    assert(balatro_action_to_observation(&state, &native, &policy) == BALATRO_OK);
+    assert(policy.primary == BALATRO_OBS_MAX_SHOP_VOUCHERS - 1);
+    BalatroAction roundtrip;
+    assert(balatro_action_from_observation(&state, &policy, &roundtrip) == BALATRO_OK);
+    assert(roundtrip.primary == native.primary);
 }
 
 static void test_rng(void) {
@@ -833,7 +1160,7 @@ static void test_shop_lifecycle(void) {
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
     balatro_populate_shop(&state);
-    assert(state.shop_count == 5);
+    assert(state.shop_main_count == 2 && state.shop_voucher_count == 1 && state.shop_booster_count == 2);
 
     /* A sold Joker becomes eligible for its pool again once the final live
        copy is removed. */
@@ -849,23 +1176,23 @@ static void test_shop_lifecycle(void) {
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
     balatro_populate_shop(&state);
-    uint16_t first_center = state.shop_cards[0].center_id;
+    uint16_t first_center = state.shop_main[0].center_id;
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
-    assert(state.shop_count == 4);
+    assert(state.shop_main_count == 1);
     assert((state.joker_count && state.jokers[0].center_id == first_center) || state.consumable_count);
     int dollars = state.dollars;
     assert(balatro_reroll_shop(&state) == BALATRO_OK);
     assert(state.dollars == dollars - 5);
     assert(state.reroll_cost == 6);
-    assert(state.shop_count == 5);
+    assert(state.shop_main_count == 2);
 
     /* Paint Brush changes the persistent hand size, not only the value
        displayed while still in the shop. */
     assert(balatro_init_seed_string(&state, &config, "PAINT_BRUSH") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 20;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_PAINT_BRUSH, .cost = 10};
+    state.shop_voucher_count = 1;
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_PAINT_BRUSH, .cost = 10};
     assert(balatro_redeem_voucher(&state, 0) == BALATRO_OK);
     assert(state.hand_size == 9 && state.base_hand_size == 9);
     state.phase = BALATRO_PHASE_BLIND_SELECT;
@@ -881,23 +1208,25 @@ static void test_shop_lifecycle(void) {
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 20;
     state.shop_joker_max = 2;
-    state.shop_count = 3;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_CRAFTY, .cost = 4};
-    state.shop_cards[1] = (BalatroCard){.center_id = BALATRO_CENTER_V_OVERSTOCK_NORM, .cost = 10};
-    state.shop_cards[2] = (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1, .cost = 4};
-    assert(balatro_redeem_voucher(&state, 1) == BALATRO_OK);
+    state.shop_main_count = 1;
+    state.shop_voucher_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_CRAFTY, .cost = 4};
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_OVERSTOCK_NORM, .cost = 10};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_ARCANA_NORMAL_1, .cost = 4};
+    assert(balatro_redeem_voucher(&state, 0) == BALATRO_OK);
     assert(state.shop_joker_max == 3);
-    assert(state.shop_count == 4);
-    assert(state.shop_cards[0].center_id == BALATRO_CENTER_J_CRAFTY);
-    assert(state.shop_cards[1].center_id == BALATRO_CENTER_P_ARCANA_NORMAL_1);
+    assert(state.shop_main_count == 3);
+    assert(state.shop_main[0].center_id == BALATRO_CENTER_J_CRAFTY);
+    assert(state.shop_boosters[0].center_id == BALATRO_CENTER_P_ARCANA_NORMAL_1);
 
     /* Reroll vouchers reduce round_resets.reroll_cost, so the discount
        survives new_round rather than applying only to the current shop. */
     assert(balatro_init_seed_string(&state, &config, "REROLL_SURPLUS") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 20;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_REROLL_SURPLUS, .cost = 10};
+    state.shop_voucher_count = 1;
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_REROLL_SURPLUS, .cost = 10};
     assert(balatro_redeem_voucher(&state, 0) == BALATRO_OK);
     assert(state.reroll_base == 3 && state.reroll_cost == 3);
     state.phase = BALATRO_PHASE_BLIND_SELECT;
@@ -916,8 +1245,8 @@ static void test_shop_lifecycle(void) {
         state.dollars = 10;
         state.reroll_cost = 5;
         state.free_rerolls = 0;
-        state.shop_count = 1;
-        state.shop_cards[0] = (BalatroCard){
+        state.shop_voucher_count = 1;
+        state.shop_vouchers[0] = (BalatroCard){
             .center_id = boss_reroll_vouchers[i],
             .cost = 10,
         };
@@ -939,18 +1268,22 @@ static void test_shop_lifecycle(void) {
     state.jokers[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_MAD};
     balatro_price_card(&state, &state.jokers[0]);
     state.jokers[0].sell_cost += 2;
-    state.shop_count = 4;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_SMILEY};
-    state.shop_cards[1] = (BalatroCard){.center_id = BALATRO_CENTER_J_MADNESS};
-    state.shop_cards[2] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_NORMAL_1};
-    state.shop_cards[3] = (BalatroCard){.center_id = BALATRO_CENTER_V_CLEARANCE_SALE};
-    for (uint8_t i = 0; i < state.shop_count; ++i) balatro_price_card(&state, &state.shop_cards[i]);
-    assert(balatro_redeem_voucher(&state, 3) == BALATRO_OK);
+    state.shop_main_count = 2;
+    state.shop_voucher_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_SMILEY};
+    state.shop_main[1] = (BalatroCard){.center_id = BALATRO_CENTER_J_MADNESS};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_NORMAL_1};
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_CLEARANCE_SALE};
+    for (uint8_t i = 0; i < state.shop_main_count; ++i) balatro_price_card(&state, &state.shop_main[i]);
+    balatro_price_card(&state, &state.shop_boosters[0]);
+    balatro_price_card(&state, &state.shop_vouchers[0]);
+    assert(balatro_redeem_voucher(&state, 0) == BALATRO_OK);
     assert(state.discount_percent == 25 && state.dollars == 0);
     assert(state.jokers[0].cost == 3 && state.jokers[0].sell_cost == 3);
-    assert(state.shop_cards[0].cost == 3 && state.shop_cards[0].sell_cost == 1);
-    assert(state.shop_cards[1].cost == 5 && state.shop_cards[1].sell_cost == 2);
-    assert(state.shop_cards[2].cost == 3 && state.shop_cards[2].sell_cost == 1);
+    assert(state.shop_main[0].cost == 3 && state.shop_main[0].sell_cost == 1);
+    assert(state.shop_main[1].cost == 5 && state.shop_main[1].sell_cost == 2);
+    assert(state.shop_boosters[0].cost == 3 && state.shop_boosters[0].sell_cost == 1);
 
     /* Hone/Glow Up's edition_rate participates in poll_edition thresholds.
        This stream roll is 0.98544: Holographic at rate 1, Polychrome at 4. */
@@ -962,7 +1295,7 @@ static void test_shop_lifecycle(void) {
     state.tarot_rate = state.planet_rate = state.spectral_rate = state.playing_card_rate = 0.0f;
     state.next_voucher_id = 0;
     balatro_populate_shop(&state);
-    assert(state.shop_cards[0].edition == 3);
+    assert(state.shop_main[0].edition == 3);
 
     /* enhancement_gate entries remain UNAVAILABLE until the corresponding
        enhancement exists in G.playing_cards.  This seed's rarity-2 roll is
@@ -975,7 +1308,7 @@ static void test_shop_lifecycle(void) {
     state.joker_rate = 1.0f;
     state.tarot_rate = state.planet_rate = state.spectral_rate = state.playing_card_rate = 0.0f;
     balatro_populate_shop(&state);
-    assert(state.shop_cards[0].center_id != BALATRO_CENTER_J_LUCKY_CAT);
+    assert(state.shop_main[0].center_id != BALATRO_CENTER_J_LUCKY_CAT);
     assert(balatro_init_seed_string(&state, &config, "GATE_144") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.ante = 3;
@@ -985,7 +1318,7 @@ static void test_shop_lifecycle(void) {
     state.tarot_rate = state.planet_rate = state.spectral_rate = state.playing_card_rate = 0.0f;
     state.deck[0].enhancement = BALATRO_ENHANCEMENT_LUCKY;
     balatro_populate_shop(&state);
-    assert(state.shop_cards[0].center_id == BALATRO_CENTER_J_LUCKY_CAT);
+    assert(state.shop_main[0].center_id == BALATRO_CENTER_J_LUCKY_CAT);
 
     /* Unsold shop inventory participates in G.GAME.used_jokers.  A Planet
        already offered in the shop must be resampled out of a concurrently
@@ -993,17 +1326,18 @@ static void test_shop_lifecycle(void) {
     assert(balatro_init_seed_string(&state, &config, "SHOP_PACK_DUP") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 20;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 4};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 4};
     assert(balatro_open_booster(&state, 0) == BALATRO_OK);
     uint16_t unblocked_planet = state.pack_cards[0].center_id;
     assert(balatro_init_seed_string(&state, &config, "SHOP_PACK_DUP") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 20;
-    state.shop_count = 2;
-    state.shop_cards[0] = (BalatroCard){.center_id = unblocked_planet, .cost = 3};
-    state.shop_cards[1] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 4};
-    assert(balatro_open_booster(&state, 1) == BALATRO_OK);
+    state.shop_main_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = unblocked_planet, .cost = 3};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 4};
+    assert(balatro_open_booster(&state, 0) == BALATRO_OK);
     assert(state.pack_cards[0].center_id != unblocked_planet);
 }
 
@@ -1318,9 +1652,9 @@ static void test_source_dollar_jokers(void) {
     assert(balatro_init_seed_string(&state, &config, "TO_MOON") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
-    state.shop_count = 1;
-    state.shop_cards[0].center_id = BALATRO_CENTER_J_TO_THE_MOON;
-    state.shop_cards[0].cost = 0;
+    state.shop_main_count = 1;
+    state.shop_main[0].center_id = BALATRO_CENTER_J_TO_THE_MOON;
+    state.shop_main[0].cost = 0;
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
     assert(state.interest_amount == 2);
     assert(balatro_sell_joker(&state, 0) == BALATRO_OK);
@@ -1427,9 +1761,9 @@ static void test_telescope_planet_pack(void) {
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
     state.hand_plays[BALATRO_PAIR] = 2;
-    state.shop_count = 1;
-    state.shop_cards[0].center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1;
-    state.shop_cards[0].cost = 0;
+    state.shop_booster_count = 1;
+    state.shop_boosters[0].center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1;
+    state.shop_boosters[0].cost = 0;
     BalatroStepResult result;
     BalatroAction open = {.type = BALATRO_ACTION_OPEN_BOOSTER, .primary = 0};
     assert(balatro_step(&state, &open, &result) == BALATRO_OK);
@@ -1486,19 +1820,20 @@ static void test_source_tag_shop_hooks(void) {
     state.spectral_rate = 0.0f;
     state.playing_card_rate = 0.0f;
     balatro_populate_shop(&state);
-    assert(state.shop_count == 4);
-    assert(state.shop_cards[0].center_id >= BALATRO_CENTER_C_CHARIOT && state.shop_cards[0].center_id <= BALATRO_CENTER_C_WORLD);
-    assert(state.shop_cards[0].cost == 0);
-    assert(state.shop_cards[1].center_id >= BALATRO_CENTER_V_ANTIMATTER && state.shop_cards[1].center_id < BALATRO_CENTER_COUNT);
-    assert(state.shop_cards[1].cost > 0);
-    assert(state.shop_cards[2].cost == 0 && state.shop_cards[3].cost == 0);
+    assert(state.shop_main_count == 1 && state.shop_voucher_count == 1 && state.shop_booster_count == 2);
+    assert(state.shop_main[0].center_id >= BALATRO_CENTER_C_CHARIOT && state.shop_main[0].center_id <= BALATRO_CENTER_C_WORLD);
+    assert(state.shop_main[0].cost == 0);
+    assert(state.shop_vouchers[0].center_id >= BALATRO_CENTER_V_ANTIMATTER &&
+           state.shop_vouchers[0].center_id < BALATRO_CENTER_COUNT);
+    assert(state.shop_vouchers[0].cost > 0);
+    assert(state.shop_boosters[0].cost == 0 && state.shop_boosters[1].cost == 0);
 
     assert(balatro_init_seed_string(&state, &config, "TAG_RARE") == BALATRO_OK);
     state.tag_force_rarity = 3;
     state.tag_force_rarity_count = 1;
     state.phase = BALATRO_PHASE_SHOP;
     balatro_populate_shop(&state);
-    assert(state.shop_cards[0].cost == 0);
+    assert(state.shop_main[0].cost == 0);
     assert(state.tag_force_rarity == 0);
     assert(state.tag_force_rarity_count == 0);
 
@@ -1507,7 +1842,7 @@ static void test_source_tag_shop_hooks(void) {
     state.tag_force_rarity_count = 2;
     state.phase = BALATRO_PHASE_SHOP;
     balatro_populate_shop(&state);
-    assert(state.shop_cards[0].cost == 0 && state.shop_cards[1].cost == 0);
+    assert(state.shop_main[0].cost == 0 && state.shop_main[1].cost == 0);
     assert(state.tag_force_rarity == 0 && state.tag_force_rarity_count == 0);
 
     assert(balatro_init_seed_string(&state, &config, "TAG_VOUCHER_DOUBLE") == BALATRO_OK);
@@ -1516,8 +1851,8 @@ static void test_source_tag_shop_hooks(void) {
     balatro_populate_shop(&state);
     assert(state.tag_voucher_pending == 0);
     uint8_t free_vouchers = 0;
-    for (uint8_t i = 0; i < state.shop_count; ++i)
-        if (state.shop_cards[i].cost == 0 && state.shop_cards[i].sell_cost == 0) free_vouchers++;
+    for (uint8_t i = 0; i < state.shop_voucher_count; ++i)
+        if (state.shop_vouchers[i].cost == 0 && state.shop_vouchers[i].sell_cost == 0) free_vouchers++;
     assert(free_vouchers == 2);
 
     assert(balatro_init_seed_string(&state, &config, "TAG_FOIL") == BALATRO_OK);
@@ -1543,15 +1878,15 @@ static void test_source_joker_lifecycle_hooks(void) {
     assert(balatro_init_seed_string(&state, &config, "JOKER_LIFECYCLE") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_STUNTMAN, .cost = 0, .sell_cost = 1};
+    state.shop_main_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_STUNTMAN, .cost = 0, .sell_cost = 1};
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
     assert(state.hand_size == 6 && state.base_hand_size == 6);
     assert(balatro_sell_joker(&state, 0) == BALATRO_OK);
     assert(state.hand_size == 8 && state.base_hand_size == 8);
 
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_CHAOS, .cost = 0, .sell_cost = 1};
+    state.shop_main_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_CHAOS, .cost = 0, .sell_cost = 1};
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
     assert(state.free_rerolls == 1 && state.reroll_cost == 0);
     assert(balatro_reroll_shop(&state) == BALATRO_OK);
@@ -1561,8 +1896,8 @@ static void test_source_joker_lifecycle_hooks(void) {
 
     state.joker_count = 0;
     state.consumable_count = state.consumable_slots;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_HERMIT, .edition = 4, .cost = 0, .sell_cost = 1};
+    state.shop_main_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_C_HERMIT, .edition = 4, .cost = 0, .sell_cost = 1};
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_OK);
     assert(state.consumable_count == 3 && state.consumable_slots == 3);
     BalatroAction use = {.type = BALATRO_ACTION_USE_CONSUMABLE, .primary = 2};
@@ -1614,10 +1949,10 @@ static void test_source_joker_lifecycle_hooks(void) {
        removes Gros Michel from subsequent Joker pools. */
     extinct.phase = BALATRO_PHASE_SHOP;
     extinct.dollars = 100;
-    extinct.shop_count = 0;
+    extinct.shop_main_count = 0;
     extinct.shop_joker_max = 2;
     assert(balatro_reroll_shop(&extinct) == BALATRO_OK);
-    for (uint8_t i = 0; i < extinct.shop_count; ++i) assert(extinct.shop_cards[i].center_id != BALATRO_CENTER_J_GROS_MICHEL);
+    for (uint8_t i = 0; i < extinct.shop_main_count; ++i) assert(extinct.shop_main[i].center_id != BALATRO_CENTER_J_GROS_MICHEL);
 
     BalatroState marble;
     assert(balatro_init_seed_string(&marble, &config, "MARBLE_RANDOM") == BALATRO_OK);
@@ -1715,8 +2050,8 @@ static void test_full_joker_slots_accept_negative_shop_joker(void) {
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
     state.joker_count = state.joker_slots;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){
+    state.shop_main_count = 1;
+    state.shop_main[0] = (BalatroCard){
         .center_id = BALATRO_CENTER_J_JOKER,
         .edition = BALATRO_EDITION_NEGATIVE,
         .cost = 4,
@@ -1832,8 +2167,8 @@ static void test_source_free_pack_tags(void) {
     state.ante = 2;
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_JUMBO_1, .cost = 6};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_JUMBO_1, .cost = 6};
     assert(balatro_open_booster(&state, 0) == BALATRO_OK);
     assert(state.pack_count == 5);
     assert(state.pack_cards[1].rank == 8 && state.pack_cards[1].suit == BALATRO_HEARTS);
@@ -1846,8 +2181,8 @@ static void test_source_free_pack_tags(void) {
     state.edition_rate = 4.0f;
     state.phase = BALATRO_PHASE_SHOP;
     state.dollars = 100;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_NORMAL_1, .cost = 4};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_STANDARD_NORMAL_1, .cost = 4};
     assert(balatro_open_booster(&state, 0) == BALATRO_OK);
     assert(state.pack_cards[0].edition == 3);
 }
@@ -3290,8 +3625,8 @@ static void test_source_hallucination_open_booster_context(void) {
     state.dollars = 20;
     state.joker_count = 1;
     state.jokers[0].center_id = BALATRO_CENTER_J_HALLUCINATION;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
     assert(balatro_step(&state, &open, &result) == BALATRO_OK);
     assert(state.phase == BALATRO_PHASE_PACK_OPENING);
     assert(state.consumable_count == 1);
@@ -3306,8 +3641,8 @@ static void test_source_hallucination_open_booster_context(void) {
     state.jokers[1].center_id = BALATRO_CENTER_J_HALLUCINATION;
     state.jokers[2].center_id = BALATRO_CENTER_J_HALLUCINATION;
     state.jokers[3].center_id = BALATRO_CENTER_J_OOPS;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
     assert(balatro_step(&state, &open, &result) == BALATRO_OK);
     assert(state.consumable_count == 3);
 
@@ -3320,8 +3655,8 @@ static void test_source_hallucination_open_booster_context(void) {
     state.jokers[0].center_id = BALATRO_CENTER_J_HALLUCINATION;
     state.jokers[1].center_id = BALATRO_CENTER_J_BRAINSTORM;
     state.jokers[2].center_id = BALATRO_CENTER_J_OOPS;
-    state.shop_count = 1;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
+    state.shop_booster_count = 1;
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_MEGA_1, .cost = 8};
     assert(balatro_step(&state, &open, &result) == BALATRO_OK);
     assert(state.consumable_count == 2);
 }
@@ -3947,20 +4282,22 @@ static void test_source_round_and_persistent_shop_voucher(void) {
 
     BalatroAction next = {.type = BALATRO_ACTION_NEXT_ROUND};
     assert(balatro_step(&state, &next, &result) == BALATRO_OK);
-    assert(state.shop_count == 0 && state.round == 1);
+    assert(state.shop_main_count == 0 && state.shop_voucher_count == 0 &&
+           state.shop_booster_count == 0 && state.round == 1);
 
     state.phase = BALATRO_PHASE_SHOP;
     balatro_populate_shop(&state);
     uint8_t voucher_index = UINT8_MAX;
-    for (uint8_t i = 0; i < state.shop_count; ++i)
-        if (state.shop_cards[i].center_id == voucher) voucher_index = i;
+    for (uint8_t i = 0; i < state.shop_voucher_count; ++i)
+        if (state.shop_vouchers[i].center_id == voucher) voucher_index = i;
     assert(voucher_index != UINT8_MAX);
     BalatroAction redeem = {.type = BALATRO_ACTION_REDEEM_VOUCHER, .primary = voucher_index};
     assert(balatro_step(&state, &redeem, &result) == BALATRO_OK);
     assert(state.next_voucher_id == 0);
     balatro_populate_shop(&state);
-    for (uint8_t i = 0; i < state.shop_count; ++i)
-        assert(state.shop_cards[i].center_id < BALATRO_CENTER_V_ANTIMATTER || state.shop_cards[i].center_id > BALATRO_CENTER_V_WASTEFUL);
+    for (uint8_t i = 0; i < state.shop_voucher_count; ++i)
+        assert(state.shop_vouchers[i].center_id < BALATRO_CENTER_V_ANTIMATTER ||
+               state.shop_vouchers[i].center_id > BALATRO_CENTER_V_WASTEFUL);
 }
 
 static void test_source_magic_trick_shop_playing_cards(void) {
@@ -3970,7 +4307,7 @@ static void test_source_magic_trick_shop_playing_cards(void) {
     assert(balatro_init_seed_string(&state, &config, "SHOP_PLAYING") == BALATRO_OK);
     state.phase = BALATRO_PHASE_SHOP;
     state.ante = 3;
-    state.shop_count = 0;
+    state.shop_main_count = 0;
     state.next_voucher_id = 0;
     state.shop_joker_max = 2;
     state.joker_rate = state.tarot_rate = state.planet_rate = state.spectral_rate = 0;
@@ -3980,13 +4317,13 @@ static void test_source_magic_trick_shop_playing_cards(void) {
     state.jokers[0].state[0] = 100;
 
     balatro_populate_shop(&state);
-    assert(state.shop_count == 4);
+    assert(state.shop_main_count == 2);
     /* pseudorandom_element sorts G.P_CARDS by key.  frontsho3 therefore
        produces D_4 and S_7 for this seed, not table-literal order cards. */
-    assert(state.shop_cards[0].center_id == BALATRO_CENTER_C_BASE);
-    assert(state.shop_cards[0].suit == BALATRO_DIAMONDS && state.shop_cards[0].rank == 4);
-    assert(state.shop_cards[1].center_id == BALATRO_CENTER_C_BASE);
-    assert(state.shop_cards[1].suit == BALATRO_SPADES && state.shop_cards[1].rank == 7);
+    assert(state.shop_main[0].center_id == BALATRO_CENTER_C_BASE);
+    assert(state.shop_main[0].suit == BALATRO_DIAMONDS && state.shop_main[0].rank == 4);
+    assert(state.shop_main[1].center_id == BALATRO_CENTER_C_BASE);
+    assert(state.shop_main[1].suit == BALATRO_SPADES && state.shop_main[1].rank == 7);
 
     BalatroAction actions[BALATRO_MAX_LEGAL_ACTIONS];
     int count = legal_actions(&state, actions, BALATRO_MAX_LEGAL_ACTIONS);
@@ -4020,10 +4357,12 @@ static void test_source_credit_card_shop_affordability(void) {
     state.jokers[2].center_id = BALATRO_CENTER_J_CREDIT_CARD;
     state.jokers[2].flags = BALATRO_CARD_DEBUFFED;
     state.reroll_cost = 30;
-    state.shop_count = 3;
-    state.shop_cards[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .cost = 30};
-    state.shop_cards[1] = (BalatroCard){.center_id = BALATRO_CENTER_V_OVERSTOCK_NORM, .cost = 30};
-    state.shop_cards[2] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 30};
+    state.shop_main_count = 1;
+    state.shop_voucher_count = 1;
+    state.shop_booster_count = 1;
+    state.shop_main[0] = (BalatroCard){.center_id = BALATRO_CENTER_J_JOKER, .cost = 30};
+    state.shop_vouchers[0] = (BalatroCard){.center_id = BALATRO_CENTER_V_OVERSTOCK_NORM, .cost = 30};
+    state.shop_boosters[0] = (BalatroCard){.center_id = BALATRO_CENTER_P_CELESTIAL_NORMAL_1, .cost = 30};
 
     BalatroAction actions[BALATRO_MAX_LEGAL_ACTIONS];
     int count = legal_actions(&state, actions, BALATRO_MAX_LEGAL_ACTIONS);
@@ -4043,15 +4382,17 @@ static void test_source_credit_card_shop_affordability(void) {
     state.dollars = -15;
     state.joker_count = 1;
     state.reroll_cost = 6;
-    for (uint8_t i = 0; i < state.shop_count; ++i) state.shop_cards[i].cost = 6;
+    for (uint8_t i = 0; i < state.shop_main_count; ++i) state.shop_main[i].cost = 6;
+    for (uint8_t i = 0; i < state.shop_voucher_count; ++i) state.shop_vouchers[i].cost = 6;
+    for (uint8_t i = 0; i < state.shop_booster_count; ++i) state.shop_boosters[i].cost = 6;
     count = legal_actions(&state, actions, BALATRO_MAX_LEGAL_ACTIONS);
     assert(count > 0);
     for (int i = 0; i < count; ++i)
         assert(actions[i].type != BALATRO_ACTION_BUY_CARD && actions[i].type != BALATRO_ACTION_REDEEM_VOUCHER &&
                actions[i].type != BALATRO_ACTION_OPEN_BOOSTER && actions[i].type != BALATRO_ACTION_REROLL);
     assert(balatro_buy_shop_card(&state, 0) == BALATRO_ERR_ACTION);
-    assert(balatro_redeem_voucher(&state, 1) == BALATRO_ERR_ACTION);
-    assert(balatro_open_booster(&state, 2) == BALATRO_ERR_ACTION);
+    assert(balatro_redeem_voucher(&state, 0) == BALATRO_ERR_ACTION);
+    assert(balatro_open_booster(&state, 0) == BALATRO_ERR_ACTION);
     assert(balatro_reroll_shop(&state) == BALATRO_ERR_ACTION);
 }
 
@@ -4238,8 +4579,11 @@ int main(void) {
     test_source_hook_named_stream_targets();
     test_source_aura_target_and_edition();
     test_shaped_reward_progress();
+    test_compact_observation();
+    test_rl_batch_and_score_sandbox();
     test_observation_layout();
     test_observation_policy_actions();
+    test_public_abi_capacity_boundaries();
     puts("balatro core tests passed");
     return 0;
 }

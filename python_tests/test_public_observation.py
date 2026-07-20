@@ -7,7 +7,9 @@ import numpy as np
 
 from simulatro.core import (
     BalatroCore,
+    CompactObservation,
     Config,
+    LegalMasks,
     Observation,
     PolicyAction,
     State,
@@ -93,6 +95,27 @@ def test_batch_crosses_native_boundary_once() -> None:
     )
     _, _, trusted_status = core.step_observe_batch(trusted_states, actions, trusted=True)
     assert list(trusted_status) == [0, 0]
+
+
+def test_compact_rl_step_and_batch() -> None:
+    core, config = configured_core()
+    state = core.reset_seed_string("OBS_RL", config)
+    policy = PolicyAction(type=2, reorder_destination=65535)
+    result, observation, legal = core.step_observe_rl(state, policy, trusted=True)
+    assert not result.terminal
+    assert isinstance(observation, CompactObservation) and observation.version == 1
+    assert isinstance(legal, LegalMasks) and legal.action_type[0]
+    assert core.legal_expand(legal).group_count > 0
+
+    states = (State * 2)(
+        core.reset_seed_string("OBS_RL_BATCH_A", config),
+        core.reset_seed_string("OBS_RL_BATCH_B", config),
+    )
+    actions = (PolicyAction * 2)(policy, policy)
+    _, observations, masks, status = core.step_observe_rl_batch(states, actions)
+    assert list(status) == [0, 0]
+    assert all(item.version == 1 for item in observations)
+    assert all(item.action_type[0] for item in masks)
 
 
 def test_observation_capacity_reports_distinct_overflow() -> None:

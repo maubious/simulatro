@@ -6,7 +6,15 @@ Requires [Balatrobot](https://github.com/maubious/balatrobot) commit [`c5021af66
 
 ## Observation space
 
-`BalatroObservation` is a fixed 15,928-byte structure. Variable-length areas use a fixed-capacity array plus `count` and `valid` fields; unused entries are zero-padded. The configured profile sets accepted capacities. If a run exceeds one, observation returns `BALATRO_ERR_OBSERVATION_CAPACITY` and reports `overflow_section` and `required_capacity` instead of silently losing data.
+The preferred training call is `balatro_observe_rl`, which emits a versioned,
+8,331-byte `BalatroCompactObservation` plus `BalatroLegalMasks` in one call.
+Variable-length areas are count-prefixed AoS sections, continuous values use
+signed-log2 Q8.8, and redeemed vouchers are bit-packed. Only each live prefix
+is written; capacity lanes after `count` are unspecified.
+
+`BalatroObservation` remains as a zero-padded debug layout for tooling that
+benefits from readable SoA fields. Capacity overflow returns
+`BALATRO_ERR_OBSERVATION_CAPACITY` rather than silently dropping state.
 
 | Section | Contents |
 |---|---|
@@ -23,6 +31,10 @@ Requires [Balatrobot](https://github.com/maubious/balatrobot) commit [`c5021af66
 | `legal` | Masks describing every currently legal action, target, card selection, and reorder destination. |
 
 Large signed values use `sign(x) * log2(1 + abs(x))`. Score fields additionally include a finite, positive-infinity, negative-infinity, or NaN class, so tensor payloads remain finite. The public observation excludes hidden RNG streams and exact draw order; those remain in `BalatroState` for deterministic simulation and snapshots.
+
+Planning tools that need enumeration can call `balatro_legal_expand` on those
+masks. This optional path materializes `BalatroLegalView`; RL stepping never
+builds or clears its 512-group storage.
 
 ## Action space
 
@@ -61,7 +73,11 @@ An agent submits `BalatroPolicyAction`:
 
 Use `legal.action_type[type]` before choosing a type. `legal.primary[type]` is a bit mask of valid `primary` slots; actions without a target use bit 0. For actions that select hand cards, the matching `play`, `discard`, `consumable[primary]`, `shop[primary]`, or `pack[primary]` entry gives `minimum`, `maximum`, `allowed_hand`, and `required_hand`. A selection must use an allowed bit, include every required bit, and satisfy the size range. Reorder masks give the reachable destination bits for each source slot.
 
-`balatro_action_from_observation` validates and translates an observation-indexed policy action. `balatro_step_observe` applies it and returns reward, terminal/win/truncation information, and the next observation. Batch and trusted equivalents provide the same transition for multiple environments or actions taken directly from the preceding legal masks.
+Shop action indices are native area-local indices, so policy and state layout
+agree without remapping. `balatro_step_observe_rl` applies a policy action and
+returns the next compact observation and masks; trusted and batch equivalents
+are available. `balatro_score_plays` evaluates scoring-time effects in an
+isolated sandbox and skips draw, cash-out, and other post-hand transitions.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -731,26 +731,19 @@ int balatro_score_hand(BalatroState *state, const BalatroCard *played, size_t pl
                        BalatroScoreResult *out) {
     if (!state || !played || !out || played_count < 1 || played_count > 5) return BALATRO_ERR_ARGUMENT;
     memset(out, 0, sizeof(*out));
+    balatro_refresh_joker_cache(state);
     uint8_t scoring = 0;
-    int four_fingers = 0, shortcut = 0, smeared = 0;
-    for (uint8_t j = 0; j < state->joker_count; ++j)
-        if (!(state->jokers[j].flags & 1u)) {
-            if (state->jokers[j].center_id == BALATRO_CENTER_J_FOUR_FINGERS) four_fingers = 1;
-            if (state->jokers[j].center_id == BALATRO_CENTER_J_SHORTCUT) shortcut = 1;
-            if (state->jokers[j].center_id == BALATRO_CENTER_J_SMEARED) smeared = 1;
-        }
+    int four_fingers = balatro_joker_active(state, BALATRO_CENTER_J_FOUR_FINGERS);
+    int shortcut = balatro_joker_active(state, BALATRO_CENTER_J_SHORTCUT);
+    int smeared = balatro_joker_active(state, BALATRO_CENTER_J_SMEARED);
     BalatroHandType hand = balatro_classify_hand_rules(played, played_count, &scoring, four_fingers, shortcut, smeared);
     /* Record this hand before debuff checks and Joker-main
        evaluation, so Supernova/Card Sharp/Obelisk observe the new count. */
     state->hand_plays[hand]++;
     state->hand_plays_round[hand]++;
-    int pareidolia = 0;
-    for (uint8_t j = 0; j < state->joker_count; ++j) {
-        const BalatroCard *joker = &state->jokers[j];
-        if (joker->flags & 1u) continue;
-        if (joker->center_id == BALATRO_CENTER_J_PAREIDOLIA) pareidolia = 1;
-        if (joker->center_id == BALATRO_CENTER_J_SPLASH) scoring = (uint8_t)((1u << played_count) - 1u);
-    }
+    int pareidolia = balatro_joker_active(state, BALATRO_CENTER_J_PAREIDOLIA);
+    if (balatro_joker_active(state, BALATRO_CENTER_J_SPLASH))
+        scoring = (uint8_t)((1u << played_count) - 1u);
     for (size_t i = 0; i < played_count; ++i)
         if (played[i].enhancement == 6) scoring |= (uint8_t)(1u << i);
     int debuffed_card = 0;
